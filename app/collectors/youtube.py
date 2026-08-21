@@ -40,6 +40,7 @@ class VideoCandidate:
     view_count: int
     duration_seconds: int
     description: str = ""
+    category_id: str | None = None
     rejection_reason: str | None = None
 
     def to_cache(self) -> dict[str, Any]:
@@ -60,6 +61,7 @@ class VideoCandidate:
             view_count=int(data.get("view_count") or 0),
             duration_seconds=int(data.get("duration_seconds") or 0),
             description=str(data.get("description") or ""),
+            category_id=data.get("category_id"),
             rejection_reason=data.get("rejection_reason"),
         )
 
@@ -79,135 +81,279 @@ class YouTubeSearchResult:
         return max(eligible, key=lambda item: item.view_count, default=None)
 
 
-_POSITIVE_TERMS = (
-    "gameplay",
-    "playthrough",
-    "lets play",
-    "walkthrough",
-    "full game",
-    "part 1",
-    "episode 1",
-    "livestream",
-    "live stream",
-    "stream vod",
-    "прохожд",
-    "летспле",
-    "геймпле",
-)
+# YouTube's search silently loses recall as a quoted OR-chain grows. Measured against one
+# game on one day: 1 branch returned 22-25 results, 3 returned 25, 4 returned 7, and the 7
+# branches this module used to send returned 1. Three is the most that stays safe, which is
+# why the term list below is short and deliberately spans languages rather than synonyms.
+MAX_QUERY_BRANCHES = 3
+SEARCH_INTENT_TERMS = ("gameplay", "playthrough", "прохождение")
 
+# A let's-play is long. Trailers, teasers, reveals and clipped highlights are not, so one
+# duration bound removes most of them without a single keyword, and what survives it is
+# already the right *shape* of video.
+MIN_DURATION_SECONDS = 480
+
+# Rejected outright: none of these is one creator playing this game and talking about it.
+# Kept narrow on purpose — a term here costs recall on every small channel that happens to
+# use the word, and the analysis stage rejects an opinion-free fragment on its own anyway.
 _REJECT_TERMS = (
+    # publisher and press material
     "trailer",
     "teaser",
+    "announcement",
+    "reveal",
+    "gameplay demo",
+    "gameplay showcase",
+    "gameplay reveal",
+    "official gameplay",
+    "opening movie",
+    "promotion movie",
+    # opinion pieces that are not a playthrough
     "review",
     "before you buy",
     "first impressions",
     "retrospective",
     "video essay",
+    "explained",
+    "lore",
+    "iceberg",
+    "reaction",
+    # instructional
     "guide",
-    "tips and tricks",
-    "how to",
     "tutorial",
+    "how to",
+    "tips and tricks",
+    "beginners",
+    "beginner",
+    "tier list",
+    "best build",
     "build guide",
-    "getting started",
-    "walkthrough guide",
-    "platinum walkthrough",
-    "achievement walkthrough",
     "all collectibles",
-    "boss fight",
-    "boss battle",
-    "soundtrack",
-    " ost ",
-    "music video",
-    "cutscene",
+    "achievement",
+    "trophy",
+    "platinum",
+    "speedrun",
+    "world record",
+    "glitch",
+    "exploit",
+    "farm",
+    "farming",
+    # assembled from other footage
+    "compilation",
+    "montage",
+    "funny moments",
+    "best moments",
+    "highlights",
+    "all bosses",
+    "all deaths",
     "all cutscenes",
+    "cutscene",
     "game movie",
     "full movie",
     "cinematic",
-    "ending",
-    "lore",
-    "explained",
-    "benchmark",
-    "graphics comparison",
-    "reaction",
-    "speedrun",
-    "world record",
-    "no commentary",
-    "without commentary",
-    "no talking",
-    "без комментариев",
-    "без комментария",
-    "all deaths",
-    "compilation",
-    "gameplay reveal",
-    "gameplay showcase",
-    "gameplay demo",
-    "official gameplay",
-    "demo",
-    "beta",
-    "alpha gameplay",
-    "early access",
-    "preview build",
+    "soundtrack",
+    " ost ",
+    "music video",
     "animation",
     "animated",
     "parody",
-    "funny moments",
-    "all bosses",
+    # not this build of this game
+    "mod",
+    "mods",
+    "modded",
+    "benchmark",
+    "fps test",
+    "performance test",
+    "graphics comparison",
+    # Russian equivalents
     "обзор",
     "гайд",
     "трейлер",
     "саундтрек",
     "катсцены",
     "первый взгляд",
+    "нарезка",
+    "приколы",
 )
 
-_TITLE_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "edition",
-    "for",
-    "game",
-    "of",
-    "remake",
-    "remastered",
-    "the",
+# Speech is the entire input to the analysis, so a video that advertises its absence is
+# worthless to us however good a let's-play it otherwise is.
+_NO_COMMENTARY_TERMS = (
+    "no commentary",
+    "without commentary",
+    "no commentary gameplay",
+    "no talking",
+    "silent playthrough",
+    "без комментариев",
+    "без комментария",
+)
+
+_SHORTS_TERMS = ("shorts", "short", "ytshorts", "reels")
+
+# YouTube's own "Gaming" category. It costs nothing — the value rides along in the snippet
+# already fetched — and it is what separates a game called Gallipoli or Superposition from
+# the battle documentary and the circuit-theory lecture that share the word.
+GAMING_CATEGORY_ID = "20"
+
+# A game whose name is one or two ordinary words is not identified by that name alone, so
+# for those, and only those, the video must also declare itself a playthrough somewhere.
+# Applying this to every game is what used to reject small channels whose titles say only
+# the game's name.
+AMBIGUOUS_NAME_MAX_TOKENS = 2
+# Creators name the game early and at the head of a segment: "Slayblade - Part 1",
+# "ХОРРОР ► Creepshow", "This new horror game is insane! | FEED IT". A one-word name that
+# turns up late or mid-sentence is usually another game's chapter or an ordinary verb —
+# "JUSANT - Chapter 1 - Daymark", "...If I Feed It". Ambiguous names must clear both bars;
+# distinctive names need no such help.
+AMBIGUOUS_NAME_MAX_SEGMENTS = 2
+_SEGMENT_SPLIT = re.compile(r"[|\-–—:;/#!?,.()\[\]►»▶★☆]+")
+# "JUSANT - Chapter 1 - Daymark" is a chapter of Jusant, not a game called Daymark. When
+# the run-up to an ambiguous name is a chapter or level counter, the name is a level label.
+_LEVEL_LABEL = re.compile(
+    r"\b(?:chapter|episode|level|act|stage|mission|part|глава|уровень|акт|часть)\s*\d+\s*$",
+    re.IGNORECASE,
+)
+_INTENT_TERMS = (
+    "gameplay",
+    "playthrough",
+    "lets play",
+    "let s play",
+    "walkthrough",
+    "full game",
+    "part 1",
+    "episode 1",
+    "ep 1",
+    "livestream",
+    "live stream",
+    "stream",
+    "first look",
+    "playing",
+    "played",
+    "прохожд",
+    "летспле",
+    "геймпле",
+    "играем",
+    "играет",
+    "стрим",
+)
+
+# Packaging that belongs to the store listing rather than to how anyone names a video.
+_EDITION_SUFFIX = re.compile(
+    r"\s*[-–—:]?\s*(?:the\s+)?"
+    r"(?:legacy|definitive|deluxe|complete|goty|game\s+of\s+the\s+year|special|gold|"
+    r"ultimate|anniversary|legendary|enhanced|extended)\s+edition\s*$",
+    re.IGNORECASE,
+)
+_PARENTHETICAL = re.compile(r"[(\[][^)\]]*[)\]]")
+_DOTTED_ACRONYM = re.compile(r"\b(?:[A-Za-z]\.){2,}")
+_ROMAN_NUMERALS = {
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "xi": "11",
+    "xii": "12",
 }
+_SEQUEL_MARKERS = set(_ROMAN_NUMERALS) | {str(number) for number in range(2, 13)}
+
+
+def search_title(title: str) -> str:
+    """The game's name as a person would type it: no bracketed suffix, no edition label."""
+    cleaned = _PARENTHETICAL.sub(" ", title).replace('"', " ")
+    cleaned = _EDITION_SUFFIX.sub("", " ".join(cleaned.split()))
+    return " ".join(cleaned.split()) or " ".join(title.split())
 
 
 def build_search_query(title: str) -> str:
-    clean_title = " ".join(title.replace('"', " ").split())
-    terms = (
-        "gameplay",
-        "playthrough",
-        "lets play",
-        "walkthrough",
-        "прохождение",
-        "летсплей",
-        "геймплей",
-    )
-    return "|".join(f'"{clean_title}" {term}' for term in terms)
+    """One quoted-phrase query, kept to `MAX_QUERY_BRANCHES` so recall does not collapse."""
+    name = search_title(title)
+    branches = [f'"{name}" {term}' for term in SEARCH_INTENT_TERMS[:MAX_QUERY_BRANCHES]]
+    return "|".join(branches)
+
+
+def title_variants(title: str) -> list[str]:
+    """Normalized phrases, any one of which names this game inside a video title.
+
+    Every variant is matched as a contiguous phrase. An earlier token-coverage rule counted
+    a title as a match when enough of its words appeared anywhere, which let "Dragon's Dogma
+    2 ... chef-d'oeuvre" satisfy the game "Chef's Dogma".
+    """
+    variants: list[str] = []
+
+    def add(value: str) -> None:
+        normalized = _normalize(value)
+        if normalized and normalized not in variants:
+            variants.append(normalized)
+
+    cleaned = search_title(title)
+    add(cleaned)
+    add(title)
+    compact = _DOTTED_ACRONYM.sub(lambda match: match.group(0).replace(".", ""), cleaned)
+    add(compact)
+    for base in (cleaned, compact):
+        add(_arabic_numerals(base))
+    return variants
 
 
 def candidate_rejection_reason(candidate: VideoCandidate, game_title: str) -> str | None:
-    """Reject obvious non-let's-play results without making subjective ranking calls."""
+    """Reject what is certainly not a let's-play of this game, and nothing else.
+
+    Eligibility is deliberately a yes/no test rather than a score: the caller picks the most
+    viewed survivor, so anything resembling a quality ranking belongs here as a hard rule or
+    not at all.
+    """
     normalized_title = _normalize(candidate.title)
     title_text = f" {normalized_title} "
     description_text = f" {_normalize(candidate.description[:1000])} "
-    searchable = title_text + description_text
 
-    if candidate.duration_seconds <= 180 or " shorts " in title_text or " short " in title_text:
-        return "shorts_or_too_short"
+    if any(f" {term} " in title_text for term in _SHORTS_TERMS):
+        return "shorts"
+    if candidate.duration_seconds < MIN_DURATION_SECONDS:
+        return "too_short"
+    if candidate.category_id is not None and candidate.category_id != GAMING_CATEGORY_ID:
+        return "not_gaming"
     if not _matches_game(normalized_title, game_title):
         return "different_game"
     for term in _REJECT_TERMS:
         if f" {_normalize(term)} " in title_text:
             return f"excluded:{term.strip().replace(' ', '_')}"
-    for term in ("no commentary", "without commentary", "no talking", "без комментариев"):
-        if f" {_normalize(term)} " in description_text:
-            return f"excluded:{term.replace(' ', '_')}"
-    if not any(term in searchable for term in _POSITIVE_TERMS):
-        return "no_gameplay_signal"
+    for term in _NO_COMMENTARY_TERMS:
+        normalized_term = f" {_normalize(term)} "
+        if normalized_term in title_text or normalized_term in description_text:
+            return "no_commentary"
+    if _name_is_ambiguous(game_title):
+        if not _name_heads_a_segment(candidate.title, game_title):
+            return "name_not_prominent"
+        if not any(term in title_text or term in description_text for term in _INTENT_TERMS):
+            return "no_gameplay_signal"
+        # Someone playing this game says so in the description too. Where the name is a
+        # level in a bigger game, the description is about that game instead.
+        if not any(f" {name} " in description_text for name in title_variants(game_title)):
+            return "name_absent_from_description"
     return None
+
+
+def _name_is_ambiguous(game_title: str) -> bool:
+    return len(_normalize(search_title(game_title)).split()) <= AMBIGUOUS_NAME_MAX_TOKENS
+
+
+def _name_heads_a_segment(candidate_title: str, game_title: str) -> bool:
+    variants = title_variants(game_title)
+    segments = [
+        normalized
+        for segment in _SEGMENT_SPLIT.split(candidate_title)
+        if (normalized := _normalize(segment))
+    ]
+    for index, normalized in enumerate(segments[:AMBIGUOUS_NAME_MAX_SEGMENTS]):
+        if not any(normalized == name or normalized.startswith(f"{name} ") for name in variants):
+            continue
+        if index and _LEVEL_LABEL.search(segments[index - 1]):
+            continue
+        return True
+    return False
 
 
 class YouTubeClient:
@@ -290,6 +436,7 @@ class YouTubeClient:
                     str((item.get("contentDetails") or {}).get("duration") or "")
                 ),
                 description=html.unescape(str(snippet.get("description") or ""))[:2000],
+                category_id=str(snippet.get("categoryId")) if snippet.get("categoryId") else None,
             )
             candidate.rejection_reason = candidate_rejection_reason(candidate, title)
             candidates.append(candidate)
@@ -327,14 +474,29 @@ def parse_iso_duration(value: str) -> int:
 
 
 def _matches_game(candidate_title: str, game_title: str) -> bool:
-    wanted = _normalize(game_title)
-    if f" {wanted} " in f" {candidate_title} ":
-        return True
-    tokens = [token for token in wanted.split() if token not in _TITLE_STOPWORDS]
-    if not tokens:
-        tokens = wanted.split()
-    present = sum(token in candidate_title.split() for token in tokens)
-    return bool(tokens) and present / len(tokens) >= 0.8
+    """True when the video title names this game as a contiguous phrase.
+
+    A trailing sequel marker is checked too: without it the game "Mortal Shell" would claim
+    every "Mortal Shell II" video, because its name is a prefix of its sequel's.
+    """
+    words = candidate_title.split()
+    for variant in title_variants(game_title):
+        tokens = variant.split()
+        if not tokens:
+            continue
+        span = len(tokens)
+        for index in range(len(words) - span + 1):
+            if words[index : index + span] != tokens:
+                continue
+            following = words[index + span] if index + span < len(words) else ""
+            if following in _SEQUEL_MARKERS and tokens[-1] not in _SEQUEL_MARKERS:
+                continue  # this is the sequel, not the game asked about
+            return True
+    return False
+
+
+def _arabic_numerals(value: str) -> str:
+    return " ".join(_ROMAN_NUMERALS.get(word.casefold(), word) for word in value.split())
 
 
 def _normalize(value: str) -> str:
