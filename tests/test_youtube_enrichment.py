@@ -423,3 +423,39 @@ def test_the_search_budget_defers_a_game_instead_of_failing_it() -> None:
     assert deferred.status == SEARCH_BUDGET
     assert youtube.calls == ["Test Game"]
     assert row_for(second.id).next_retry_at is None  # picked up again by the next run
+
+
+def test_a_yt_dlp_failure_eventually_reaches_the_video_fallback() -> None:
+    """A broken caption read says nothing about whether Gemini can watch the video."""
+    game = store_game("transcript-then-video")
+    youtube = FakeYouTube([candidate("readable")])
+    transcripts = FakeTranscripts(error=TranscriptTemporaryError("yt-dlp timed out"))
+    video = FakeGemini([analysis_result(source="video", model="test-video-model")], method="video")
+
+    first = run(game.id, youtube, transcripts, FakeGemini(), video)
+    assert first.status == TRANSCRIPT_ERROR
+    assert video.calls == []  # one blip must not spend the scarce fallback budget
+    expire_retry(game.id)
+
+    second = run(game.id, FakeYouTube([]), transcripts, FakeGemini(), video)
+
+    assert second.status == SUCCESS
+    assert second.source == "video"
+    assert video.calls[0]["video_url"].endswith("readable")
+    assert row_for(game.id).analysis_source == "video"
+
+
+def test_a_recovered_caption_read_clears_the_error_streak() -> None:
+    game = store_game("transcript-recovers")
+    failing = FakeTranscripts(error=TranscriptTemporaryError("yt-dlp timed out"))
+    video = FakeGemini(method="video")
+
+    run(game.id, FakeYouTube([candidate("flaky")]), failing, FakeGemini(), video)
+    expire_retry(game.id)
+    working = FakeTranscripts({"flaky": spoken_track("flaky")})
+    outcome = run(game.id, FakeYouTube([]), working, FakeGemini(), video)
+
+    assert outcome.status == SUCCESS
+    assert outcome.source == "transcript"
+    assert video.calls == []
+    assert (row_for(game.id).search_data or {}).get("transcript_errors") == 0

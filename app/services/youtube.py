@@ -87,6 +87,12 @@ _TRY_NEXT_SOURCE = {VIDEO_UNAVAILABLE, NO_USEFUL_COMMENTARY, NO_TRANSCRIPT}
 # candidates in one pass looking for one that actually publishes captions.
 MAX_TRANSCRIPT_ATTEMPTS = 3
 
+# yt-dlp breaking on a video says nothing about whether Gemini can watch it, so a
+# technical caption failure must not lock a game out of the fallback for good. It is still
+# worth one plain retry first: a single timeout is far more likely to be a blip than a
+# video that will never yield captions, and the fallback's budget is the scarce one.
+TRANSCRIPT_ERRORS_BEFORE_FALLBACK = 2
+
 
 @dataclass(slots=True)
 class YouTubeOutcome:
@@ -274,20 +280,17 @@ class YouTubeEnrichmentSession:
                 fallback_source = fallback_source or candidate
                 self._mark_attempted(row)
                 self._failure(row, NO_TRANSCRIPT, str(exc))
-            except TranscriptTemporaryError as exc:
+            except (TranscriptTemporaryError, TranscriptError) as exc:
                 self._failure(row, TRANSCRIPT_ERROR, str(exc))
                 outcome.error = str(exc)
-                return None, None
-            except TranscriptError as exc:
-                self._failure(row, TRANSCRIPT_ERROR, str(exc))
-                outcome.error = str(exc)
-                return None, None
+                return None, self._fallback_after_error(row, candidate)
             except Exception as exc:  # a yt-dlp surprise must not reach the crawler
                 logger.exception("Transcript read crashed video=%s", candidate.video_id)
                 self._failure(row, TRANSCRIPT_ERROR, f"{type(exc).__name__}: {exc}")
                 outcome.error = row.status_reason
-                return None, None
+                return None, self._fallback_after_error(row, candidate)
             else:
+                self._clear_transcript_errors(row)
                 return window, None
 
             db.flush()
@@ -554,6 +557,7 @@ class YouTubeEnrichmentSession:
         row.view_count = candidate.view_count
         row.duration_seconds = candidate.duration_seconds
         if changed:
+            self._clear_transcript_errors(row)
             row.speech_transcript = None
             row.summary = None
             row.liked = None
@@ -577,6 +581,21 @@ class YouTubeEnrichmentSession:
         row.status_reason = reason[:1000]
         row.next_retry_at = now + timedelta(hours=settings.youtube_retry_interval_hours)
         row.updated_at = now
+
+    def _fallback_after_error(
+        self, row: YouTubeAnalysis, candidate: VideoCandidate
+    ) -> VideoCandidate | None:
+        """Offer the source to the video fallback once caption reads keep failing on it."""
+        data = dict(row.search_data or {})
+        streak = int(data.get("transcript_errors") or 0) + 1
+        data["transcript_errors"] = streak
+        row.search_data = data
+        return candidate if streak >= TRANSCRIPT_ERRORS_BEFORE_FALLBACK else None
+
+    def _clear_transcript_errors(self, row: YouTubeAnalysis) -> None:
+        data = row.search_data or {}
+        if data.get("transcript_errors"):
+            row.search_data = {**data, "transcript_errors": 0}
 
     def _mark_attempted(self, row: YouTubeAnalysis) -> None:
         if not row.video_id:
