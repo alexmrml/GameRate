@@ -35,6 +35,7 @@ def uuid_pk() -> Mapped[uuid.UUID]:
 class RunTrigger(enum.StrEnum):
     MANUAL = "manual"
     DAILY = "daily"
+    SCHEDULED = "scheduled"
 
 
 class RunStatus(enum.StrEnum):
@@ -113,6 +114,8 @@ class Game(Base):
     developer: Mapped[str | None] = mapped_column(String(255))
     publisher: Mapped[str | None] = mapped_column(String(255))
     metacritic_url: Mapped[str | None] = mapped_column(String(1000))
+    cover_image_url: Mapped[str | None] = mapped_column(String(1000))
+    video_url: Mapped[str | None] = mapped_column(String(1000))
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -123,6 +126,9 @@ class Game(Base):
     )
     genres: Mapped[list["Genre"]] = relationship(secondary=game_genres, back_populates="games")
     tags: Mapped[list["Tag"]] = relationship(secondary=game_tags, back_populates="games")
+    reviews: Mapped[list["GameReview"]] = relationship(
+        back_populates="game", cascade="all, delete-orphan"
+    )
     review_summaries: Mapped[list["ReviewSummary"]] = relationship(
         back_populates="game", cascade="all, delete-orphan"
     )
@@ -183,6 +189,36 @@ class Tag(Base):
     slug: Mapped[str] = mapped_column(String(100), unique=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
     games: Mapped[list[Game]] = relationship(secondary=game_tags, back_populates="tags")
+
+
+class GameReview(Base):
+    """A single collected review kept verbatim as summarization input."""
+
+    __tablename__ = "game_reviews"
+    __table_args__ = (
+        UniqueConstraint("game_id", "external_key", name="uq_game_review_external_key"),
+        Index("ix_game_reviews_game_audience", "game_id", "audience"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    game_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"))
+    platform_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("platforms.id", ondelete="SET NULL")
+    )
+    audience: Mapped[Audience] = mapped_column(Enum(Audience, name="review_audience"))
+    external_key: Mapped[str] = mapped_column(String(255))
+    quote: Mapped[str] = mapped_column(Text)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
+    author: Mapped[str | None] = mapped_column(String(255))
+    publication: Mapped[str | None] = mapped_column(String(255))
+    url: Mapped[str | None] = mapped_column(String(1000))
+    review_date: Mapped[date | None] = mapped_column(Date)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    game: Mapped[Game] = relationship(back_populates="reviews")
+    platform: Mapped[Platform | None] = relationship()
 
 
 class ReviewSummary(Base):
