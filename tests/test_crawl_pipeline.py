@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.collectors.gemini import GeminiTemporaryError, GeminiUnavailable
+from app.collectors.youtube import YouTubeTemporaryError
 from app.db import SessionLocal
 from app.models import (
     CrawlStatus,
@@ -25,6 +26,7 @@ from app.services.crawl import STAGE_BROWSE, STAGE_NEW_RELEASES
 from app.services.enrichment import EnrichmentSession
 from app.services.pipeline import execute_run
 from app.services.runs import enqueue_manual_run, enqueue_scheduled_run
+from app.services.youtube import YouTubeEnrichmentSession
 from tests.conftest import StubGeminiClient, StubMetacriticClient, build_snapshot
 
 DAY_ONE = date(2026, 8, 21)
@@ -367,3 +369,36 @@ def test_enrichment_is_absent_from_the_run_when_no_key_is_configured(
     assert ai["enabled"] is False
     assert ai["disabled_reason"] == "GEMINI_API_KEY is not configured"
     assert result["message"] == "Processed 1 games"
+
+
+def test_youtube_failures_do_not_change_the_crawl_or_review_enrichment_result(
+    frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingYouTube:
+        def search_game(self, _title: str):
+            raise YouTubeTemporaryError("503 YouTube unavailable")
+
+        def close(self) -> None:
+            pass
+
+    gemini = StubGeminiClient()
+    monkeypatch.setattr(
+        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "YouTubeEnrichmentSession",
+        lambda db: YouTubeEnrichmentSession(
+            db, youtube_client=FailingYouTube(), gemini_client=object()
+        ),
+    )
+
+    result = run_batch(rich_stub("alpha", "beta"))
+
+    assert result["status"] is RunStatus.SUCCEEDED
+    assert result["details"]["ai"]["generated"] == 2
+    assert result["details"]["youtube"]["failed"] == 2
+    assert result["details"]["youtube"]["search_calls"] == 2
+    assert "YouTube: 2 failed" in result["message"]
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 4

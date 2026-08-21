@@ -5,8 +5,9 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import UserSession
+from app.models import AppSetting, UserSession
 from app.security import token_digest
+from app.time import utc_now
 
 
 def test_health_and_protected_redirect(client: TestClient) -> None:
@@ -53,3 +54,34 @@ def test_authenticated_mutation_requires_csrf(authenticated_client: TestClient) 
     response = authenticated_client.post("/activity/runs", data={"csrf_token": csrf.group(1)})
     assert response.status_code == 303
     assert response.headers["location"] == "/activity"
+
+
+def test_provider_keys_cannot_be_saved_or_rendered_on_settings(
+    authenticated_client: TestClient,
+) -> None:
+    page = authenticated_client.get("/settings")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert csrf is not None
+
+    rejected = authenticated_client.post(
+        "/settings",
+        data={
+            "csrf_token": csrf.group(1),
+            "key": "google.cloud.api-key",
+            "value": "should-never-be-stored",
+        },
+    )
+    assert rejected.status_code == 422
+
+    # Even a legacy/manual row is redacted from the UI.
+    with SessionLocal() as db:
+        db.add(
+            AppSetting(
+                key="GOOGLE_CLOUD_API_KEY",
+                value="legacy-secret",
+                updated_at=utc_now(),
+            )
+        )
+        db.commit()
+    rendered = authenticated_client.get("/settings")
+    assert "legacy-secret" not in rendered.text

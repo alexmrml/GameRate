@@ -153,6 +153,68 @@ def test_tags_outside_the_vocabulary_are_dropped() -> None:
     assert "style" not in result.facets
 
 
+def test_youtube_video_uses_clipping_and_a_structured_speech_schema() -> None:
+    fake = sdk(
+        reply(
+            {
+                "has_useful_commentary": True,
+                "speech_transcript": "I like the combat, but loading takes too long.",
+                "overall_opinion_evidence": "I like the combat, but loading takes too long",
+                "overall_impression": "Positive, with reservations about loading.",
+                "liked": [
+                    {
+                        "statement": "Combat feels responsive",
+                        "speech_evidence": "I like the combat",
+                    }
+                ],
+                "disliked": [
+                    {
+                        "statement": "Loading interrupts the pace",
+                        "speech_evidence": "loading takes too long",
+                    }
+                ],
+            }
+        )
+    )
+
+    result = client_for(fake).analyze_youtube_video(
+        game_title="Test Game",
+        video_url="https://www.youtube.com/watch?v=video123",
+        start_seconds=1200,
+        end_seconds=2100,
+    )
+
+    assert result.has_useful_commentary
+    assert result.liked == ["Combat feels responsive"]
+    call = fake.models.calls[0]
+    video_part = call.contents.parts[0]
+    assert video_part.file_data.file_uri.endswith("video123")
+    assert video_part.video_metadata.start_offset == "1200s"
+    assert video_part.video_metadata.end_offset == "2100s"
+    assert set(call.config.response_schema.model_fields) == {
+        "has_useful_commentary",
+        "speech_transcript",
+        "overall_opinion_evidence",
+        "overall_impression",
+        "liked",
+        "disliked",
+    }
+
+
+def test_gemma_is_not_used_for_speech_analysis_without_an_audio_track() -> None:
+    fake = sdk(reply({}))
+    gemma = GeminiClient(client=fake, model="gemma-4-31b-it", sleep=lambda _s: None)
+
+    with pytest.raises(GeminiUnavailable, match="audio track"):
+        gemma.analyze_youtube_video(
+            game_title="Test Game",
+            video_url="https://www.youtube.com/watch?v=video123",
+            start_seconds=0,
+            end_seconds=900,
+        )
+    assert fake.models.calls == []
+
+
 def test_review_prompt_labels_audiences_and_omits_the_missing_one() -> None:
     prompt = build_review_prompt(GAME, CRITICS, [])
 

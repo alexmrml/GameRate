@@ -6,7 +6,16 @@ from sqlalchemy import func, select
 
 from app.collectors.metacritic import PlatformScore
 from app.db import SessionLocal
-from app.models import Audience, Game, GamePlatform, Platform, ReviewSummary, Tag, game_tags
+from app.models import (
+    Audience,
+    Game,
+    GamePlatform,
+    Platform,
+    ReviewSummary,
+    Tag,
+    YouTubeAnalysis,
+    game_tags,
+)
 from app.services.games import apply_game_snapshot, upsert_discovered_game
 from app.time import utc_now
 from tests.conftest import build_snapshot
@@ -219,3 +228,45 @@ def test_detail_page_shows_summaries_tags_and_similar_games(
     assert "Hero B" in body
     assert f"/games/{second.id}" in body
     assert "Shared gameplay: platforming" in body
+
+
+def test_detail_page_shows_youtube_source_and_speech_grounded_findings(
+    authenticated_client: TestClient,
+) -> None:
+    game = catalogue_game("youtube", title="Video Game", platforms=[("pc", 80, "8.0", 10)])
+    now = utc_now()
+    with SessionLocal() as db:
+        db.add(
+            YouTubeAnalysis(
+                game_id=game.id,
+                status="success",
+                video_id="abc123",
+                video_url="https://www.youtube.com/watch?v=abc123",
+                video_title="Video Game Let's Play Part 1",
+                channel_title="Thoughtful Creator",
+                view_count=1_234_567,
+                duration_seconds=3600,
+                fragment_start_seconds=2700,
+                fragment_end_seconds=3600,
+                speech_transcript="The combat is quick, but the checkpoints are frustrating.",
+                summary="The creator enjoys combat but dislikes checkpoint placement.",
+                liked=["Combat reacts quickly to inputs"],
+                disliked=["Checkpoints repeat too much progress"],
+                analysis_data={"prompt_version": "4"},
+                model_name="test-video-model",
+                analyzed_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        db.commit()
+
+    body = authenticated_client.get(f"/games/{game.id}").text
+    assert "Let&#39;s-play perspective" in body or "Let's-play perspective" in body
+    assert "Thoughtful Creator" in body
+    assert "1,234,567 views" in body
+    assert "Watch on YouTube" in body
+    assert "The creator enjoys combat" in body
+    assert "Combat reacts quickly" in body
+    assert "Checkpoints repeat too much" in body
+    assert "Speech evidence from the fragment" in body

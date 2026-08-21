@@ -27,6 +27,15 @@ os.environ["AI_MAX_GAMES_PER_RUN"] = "20"
 os.environ["AI_REFRESH_MIN_NEW_REVIEWS"] = "5"
 os.environ["AI_REFRESH_MIN_GROWTH"] = "0.25"
 os.environ["AI_MIN_REFRESH_INTERVAL_HOURS"] = "12"
+# YouTube and its Gemini video calls are always injected fakes in tests.
+os.environ["GOOGLE_CLOUD_API_KEY"] = ""
+os.environ["YOUTUBE_ANALYSIS_ENABLED"] = "true"
+os.environ["YOUTUBE_ANALYSIS_MODEL"] = "test-video-model"
+os.environ["YOUTUBE_ANALYSIS_FRAGMENT_MINUTES"] = "15"
+os.environ["YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN"] = "3"
+os.environ["YOUTUBE_SEARCH_MAX_RESULTS"] = "25"
+os.environ["YOUTUBE_RETRY_INTERVAL_HOURS"] = "24"
+os.environ["YOUTUBE_NO_RESULT_REFRESH_DAYS"] = "30"
 
 from app.collectors.gemini import (  # noqa: E402
     AudienceResult,
