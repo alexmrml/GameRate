@@ -74,19 +74,43 @@ TUNABLES: tuple[TunableSetting, ...] = (
         "youtube.model",
         str,
         "youtube_analysis_model",
-        "Multimodal Gemini model used for YouTube speech analysis",
+        "Model that reads the subtitle fragment of a let's-play",
+    ),
+    TunableSetting(
+        "youtube.video_fallback_model",
+        str,
+        "youtube_video_fallback_model",
+        "Multimodal Gemini model used only when a video publishes no usable subtitles",
     ),
     TunableSetting(
         "youtube.fragment_minutes",
         int,
         "youtube_analysis_fragment_minutes",
-        "Minutes from the end of the selected video sent to Gemini",
+        "Length of the analyzed fragment near the end of the video, in minutes",
+    ),
+    TunableSetting(
+        "youtube.min_words_per_minute",
+        int,
+        "youtube_transcript_min_words_per_minute",
+        "Speech rate a fragment must hold to count as commentary rather than silence",
     ),
     TunableSetting(
         "youtube.max_games_per_run",
         int,
         "youtube_analysis_max_games_per_run",
         "Maximum games searched or analyzed per processing run",
+    ),
+    TunableSetting(
+        "youtube.max_searches_per_run",
+        int,
+        "youtube_max_searches_per_run",
+        "YouTube Data API searches per run; each costs 100 of the 10 000 daily units",
+    ),
+    TunableSetting(
+        "youtube.max_video_fallbacks_per_run",
+        int,
+        "youtube_max_video_fallbacks_per_run",
+        "Multimodal video calls per run, for games whose sources have no subtitles",
     ),
 )
 

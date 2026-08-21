@@ -30,6 +30,7 @@ from app.services.games import apply_game_snapshot
 from app.services.youtube import (
     NO_CANDIDATE,
     NO_USEFUL_COMMENTARY,
+    SEARCH_BUDGET,
     SUCCESS,
     UNCHANGED,
     YouTubeEnrichmentSession,
@@ -309,13 +310,16 @@ def enrich_youtube_games(
     summary: dict[str, Any] = {
         "enabled": session.enabled,
         "model": session.model,
+        "video_fallback_model": session.video_fallback_model,
         "planned": 0,
         "succeeded": 0,
         "failed": 0,
         "no_candidate": 0,
         "skipped": 0,
         "search_calls": 0,
+        "transcript_reads": 0,
         "gemini_calls": 0,
+        "video_fallback_calls": 0,
         "games": [],
     }
     if not session.enabled:
@@ -371,7 +375,7 @@ def enrich_youtube_games(
                 summary["succeeded"] += 1
             elif outcome.status == NO_CANDIDATE:
                 summary["no_candidate"] += 1
-            elif outcome.status == UNCHANGED:
+            elif outcome.status in {UNCHANGED, SEARCH_BUDGET}:
                 summary["skipped"] += 1
             elif outcome.status == NO_USEFUL_COMMENTARY or outcome.error:
                 summary["failed"] += 1
@@ -385,7 +389,9 @@ def enrich_youtube_games(
         session.close()
 
     summary["search_calls"] = session.search_calls
+    summary["transcript_reads"] = session.transcript_reads
     summary["gemini_calls"] = session.gemini_calls
+    summary["video_fallback_calls"] = session.video_fallback_calls
     if session.youtube_disabled_reason:
         summary["youtube_disabled_reason"] = session.youtube_disabled_reason
     if session.gemini_disabled_reason:
@@ -403,6 +409,8 @@ def _youtube_note(details: dict[str, Any]) -> str:
         parts.append(f"{details['no_candidate']} without a candidate")
     if details.get("failed"):
         parts.append(f"{details['failed']} failed")
+    if details.get("video_fallback_calls"):
+        parts.append(f"{details['video_fallback_calls']} via video fallback")
     return f" · YouTube: {', '.join(parts)}" if parts else ""
 
 

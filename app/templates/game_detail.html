@@ -38,8 +38,8 @@
       </div>
     </div>
     <div class="detail-actions">
-      {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Open source</a>{% endif %}
-      {% if game.video_url %}<a class="button button-quiet" href="{{ game.video_url }}" rel="noreferrer">Watch video</a>{% endif %}
+      {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Metacritic</a>{% endif %}
+      {% if game.video_url %}<a class="button button-quiet" href="{{ game.video_url }}" rel="noreferrer">Trailer</a>{% endif %}
     </div>
   </div>
 
@@ -103,9 +103,18 @@
           </div>
         </div>
         {% if item.speech_transcript %}
-          <details class="speech-evidence"><summary>Speech evidence from the fragment</summary><p>{{ item.speech_transcript }}</p></details>
+          <details class="speech-evidence">
+            <summary>
+              {% if item.analysis_source == 'transcript' %}
+                Subtitles of the fragment{% if item.transcript_language %} ({{ item.transcript_language }}{% if item.transcript_is_automatic %}, auto-generated{% endif %}){% endif %}
+              {% else %}
+                Speech evidence from the fragment
+              {% endif %}
+            </summary>
+            <p>{{ item.speech_transcript }}</p>
+          </details>
         {% endif %}
-        <span class="muted">{{ item.model_name }} · {{ item.analyzed_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+        <span class="muted">{{ item.model_name }}{% if item.analysis_source == 'video' %} · video fallback{% endif %} · {{ item.analyzed_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
       {% else %}
         <p class="empty-copy">YouTube analysis status: {{ item.status.replace('_', ' ') }}{% if item.status_reason %} — {{ item.status_reason }}{% endif %}</p>
       {% endif %}

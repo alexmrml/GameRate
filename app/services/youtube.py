@@ -1,4 +1,10 @@
-"""Best-effort YouTube discovery and speech-grounded Gemini analysis.
+"""Best-effort YouTube discovery and speech-grounded let's-play analysis.
+
+The main path never touches media: yt-dlp reads the video's own subtitles, a density
+scan picks the stretch near the end that still carries commentary, and that text is
+analysed like any other text. Only a source that publishes no usable subtitles falls
+back to sending the video itself to a multimodal model, which is why that fallback has
+its own small per-run budget while the main path does not.
 
 One row per game is both the durable state machine and the search cache. A successful
 analysis is stable; provider failures wait before retrying, and a source with no useful
@@ -15,12 +21,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.collectors.gemini import (
+    TRANSCRIPT_SOURCE,
+    VIDEO_SOURCE,
     YOUTUBE_PROMPT_VERSION,
     GeminiClient,
     GeminiInvalidResponse,
     GeminiTemporaryError,
     GeminiUnavailable,
     GeminiVideoUnavailable,
+    YouTubeVideoResult,
+)
+from app.collectors.transcript import (
+    TranscriptClient,
+    TranscriptError,
+    TranscriptTemporaryError,
+    TranscriptTooQuiet,
+    TranscriptUnavailable,
+    TranscriptVideoUnavailable,
+    TranscriptWindow,
+    select_tail_window,
 )
 from app.collectors.youtube import (
     VideoCandidate,
@@ -45,14 +64,28 @@ YOUTUBE_ERROR = "youtube_error"
 YOUTUBE_UNAVAILABLE = "youtube_unavailable"
 YOUTUBE_QUOTA_EXHAUSTED = "youtube_quota_exhausted"
 VIDEO_UNAVAILABLE = "video_unavailable"
+NO_TRANSCRIPT = "no_transcript"
+TRANSCRIPT_ERROR = "transcript_error"
 GEMINI_FAILED = "gemini_failed"
 GEMINI_UNAVAILABLE = "gemini_unavailable"
 GEMINI_QUOTA_EXHAUSTED = "gemini_quota_exhausted"
 NO_USEFUL_COMMENTARY = "no_useful_commentary"
 UNCHANGED = "unchanged"
+# Not persisted: the run simply ran out of Data API budget before reaching this game.
+SEARCH_BUDGET = "search_budget"
 
-_RETRY_SAME_SOURCE = {PENDING, GEMINI_FAILED, GEMINI_UNAVAILABLE, GEMINI_QUOTA_EXHAUSTED}
-_TRY_NEXT_SOURCE = {VIDEO_UNAVAILABLE, NO_USEFUL_COMMENTARY}
+_RETRY_SAME_SOURCE = {
+    PENDING,
+    TRANSCRIPT_ERROR,
+    GEMINI_FAILED,
+    GEMINI_UNAVAILABLE,
+    GEMINI_QUOTA_EXHAUSTED,
+}
+_TRY_NEXT_SOURCE = {VIDEO_UNAVAILABLE, NO_USEFUL_COMMENTARY, NO_TRANSCRIPT}
+
+# Reading subtitles is cheap and makes no model call, so a game may walk a few cached
+# candidates in one pass looking for one that actually publishes captions.
+MAX_TRANSCRIPT_ATTEMPTS = 3
 
 
 @dataclass(slots=True)
@@ -60,7 +93,9 @@ class YouTubeOutcome:
     title: str
     status: str = UNCHANGED
     video_id: str | None = None
+    source: str | None = None
     search_called: bool = False
+    transcript_reads: int = 0
     gemini_called: bool = False
     error: str | None = None
 
@@ -68,8 +103,12 @@ class YouTubeOutcome:
         details: dict[str, Any] = {"title": self.title, "status": self.status}
         if self.video_id:
             details["video_id"] = self.video_id
+        if self.source:
+            details["source"] = self.source
         if self.search_called:
             details["search_called"] = True
+        if self.transcript_reads:
+            details["transcript_reads"] = self.transcript_reads
         if self.gemini_called:
             details["gemini_called"] = True
         if self.error:
@@ -89,26 +128,37 @@ def youtube_needs_work(row: YouTubeAnalysis | None) -> bool:
 
 
 class YouTubeEnrichmentSession:
-    """Provider clients and failure isolation for one processing run."""
+    """Provider clients, per-run budgets and failure isolation for one processing run."""
 
     def __init__(
         self,
         db: Session,
         *,
         youtube_client: YouTubeClient | Any | None = None,
+        transcript_client: TranscriptClient | Any | None = None,
         gemini_client: GeminiClient | Any | None = None,
+        video_gemini_client: GeminiClient | Any | None = None,
     ) -> None:
         self.enabled = bool(get_setting(db, "youtube.enabled"))
         self.model = str(get_setting(db, "youtube.model"))
+        self.video_fallback_model = str(get_setting(db, "youtube.video_fallback_model"))
         self.fragment_minutes = int(get_setting(db, "youtube.fragment_minutes"))
+        self.min_words_per_minute = int(get_setting(db, "youtube.min_words_per_minute"))
         self.max_games = int(get_setting(db, "youtube.max_games_per_run"))
+        self.max_searches = int(get_setting(db, "youtube.max_searches_per_run"))
+        self.max_video_fallbacks = int(get_setting(db, "youtube.max_video_fallbacks_per_run"))
         self.disabled_reason: str | None = None
         self.youtube_disabled_reason: str | None = None
         self.gemini_disabled_reason: str | None = None
+        self.video_disabled_reason: str | None = None
         self.search_calls = 0
+        self.transcript_reads = 0
         self.gemini_calls = 0
+        self.video_fallback_calls = 0
         self._youtube = youtube_client
+        self._transcript = transcript_client
         self._gemini = gemini_client
+        self._video_gemini = video_gemini_client
 
         missing = []
         if youtube_client is None and not settings.google_cloud_api_key:
@@ -122,21 +172,34 @@ class YouTubeEnrichmentSession:
             self.disabled_reason = f"{', '.join(missing)} is not configured"
 
     def close(self) -> None:
-        if self._youtube is not None and hasattr(self._youtube, "close"):
-            self._youtube.close()
+        for client in (self._youtube, self._transcript):
+            if client is not None and hasattr(client, "close"):
+                client.close()
 
     def youtube_client(self) -> YouTubeClient:
         if self._youtube is None:
             self._youtube = YouTubeClient()
         return self._youtube
 
+    def transcript_client(self) -> TranscriptClient:
+        if self._transcript is None:
+            self._transcript = TranscriptClient()
+        return self._transcript
+
     def gemini_client(self) -> GeminiClient:
         if self._gemini is None:
             self._gemini = GeminiClient(model=self.model)
         return self._gemini
 
+    def video_gemini_client(self) -> GeminiClient:
+        if self._video_gemini is None:
+            self._video_gemini = GeminiClient(model=self.video_fallback_model)
+        return self._video_gemini
+
+    # --- one game -----------------------------------------------------------------
+
     def enrich_game(self, db: Session, game: Game) -> YouTubeOutcome:
-        """Run at most one search and one logical video analysis for a game."""
+        """Produce at most one summary for a game, from at most one video."""
         outcome = YouTubeOutcome(title=game.title)
         if not self.enabled or self.disabled_reason:
             outcome.error = self.disabled_reason
@@ -148,12 +211,7 @@ class YouTubeEnrichmentSession:
             return outcome
         if row is None:
             now = utc_now()
-            row = YouTubeAnalysis(
-                game_id=game.id,
-                status=PENDING,
-                created_at=now,
-                updated_at=now,
-            )
+            row = YouTubeAnalysis(game_id=game.id, status=PENDING, created_at=now, updated_at=now)
             db.add(row)
             db.flush()
 
@@ -161,41 +219,117 @@ class YouTubeEnrichmentSession:
         if candidate is None:
             candidate = self._discover(row, game, outcome)
             if candidate is None:
-                outcome.status = row.status
-                db.flush()
+                if outcome.status not in {SEARCH_BUDGET}:
+                    outcome.status = row.status
+                    db.flush()
                 return outcome
-        self._apply_candidate(row, candidate)
-        outcome.video_id = candidate.video_id
 
-        duration = candidate.duration_seconds
-        end_seconds = max(duration, 0)
-        start_seconds = max(0, end_seconds - self.fragment_minutes * 60)
-        row.fragment_start_seconds = start_seconds
-        row.fragment_end_seconds = end_seconds
-        row.status = PENDING
-        row.status_reason = None
-        row.next_retry_at = None
-        row.updated_at = utc_now()
+        window, fallback_source = self._find_transcript(db, row, candidate, outcome)
+        if window is not None:
+            self._analyze_transcript(row, game, window, outcome)
+        elif fallback_source is not None:
+            self._analyze_video(row, game, fallback_source, outcome)
+        else:
+            outcome.status = row.status
+            outcome.error = outcome.error or row.status_reason
+        db.flush()
+        return outcome
+
+    def _find_transcript(
+        self,
+        db: Session,
+        row: YouTubeAnalysis,
+        candidate: VideoCandidate,
+        outcome: YouTubeOutcome,
+    ) -> tuple[TranscriptWindow | None, VideoCandidate | None]:
+        """Walk cached candidates until one publishes usable subtitles.
+
+        Returns the chosen window and, separately, the candidate the video fallback may
+        use — only ever a video whose *captions* were missing, never one the extractor
+        could not read at all.
+        """
+        fallback_source: VideoCandidate | None = None
+        client = self.transcript_client()
+
+        for attempt in range(MAX_TRANSCRIPT_ATTEMPTS):
+            self._apply_candidate(row, candidate)
+            outcome.video_id = candidate.video_id
+            self.transcript_reads += 1
+            outcome.transcript_reads += 1
+            try:
+                track = client.fetch(candidate.video_id)
+                window = select_tail_window(
+                    track,
+                    window_seconds=self.fragment_minutes * 60,
+                    min_words_per_minute=self.min_words_per_minute,
+                )
+            except TranscriptVideoUnavailable as exc:
+                outcome.error = str(exc)
+                self._mark_attempted(row)
+                self._failure(row, VIDEO_UNAVAILABLE, str(exc))
+            except (TranscriptUnavailable, TranscriptTooQuiet) as exc:
+                # The video plays fine, it simply has no usable captions: the one case
+                # the multimodal fallback exists for.
+                outcome.error = str(exc)
+                fallback_source = fallback_source or candidate
+                self._mark_attempted(row)
+                self._failure(row, NO_TRANSCRIPT, str(exc))
+            except TranscriptTemporaryError as exc:
+                self._failure(row, TRANSCRIPT_ERROR, str(exc))
+                outcome.error = str(exc)
+                return None, None
+            except TranscriptError as exc:
+                self._failure(row, TRANSCRIPT_ERROR, str(exc))
+                outcome.error = str(exc)
+                return None, None
+            except Exception as exc:  # a yt-dlp surprise must not reach the crawler
+                logger.exception("Transcript read crashed video=%s", candidate.video_id)
+                self._failure(row, TRANSCRIPT_ERROR, f"{type(exc).__name__}: {exc}")
+                outcome.error = row.status_reason
+                return None, None
+            else:
+                return window, None
+
+            db.flush()
+            if attempt + 1 >= MAX_TRANSCRIPT_ATTEMPTS:
+                break
+            following = _next_cached_candidate(row)
+            if following is None:
+                break
+            candidate = following
+
+        return None, fallback_source
+
+    def _analyze_transcript(
+        self,
+        row: YouTubeAnalysis,
+        game: Game,
+        window: TranscriptWindow,
+        outcome: YouTubeOutcome,
+    ) -> None:
+        row.fragment_start_seconds = window.start_seconds
+        row.fragment_end_seconds = window.end_seconds
+        row.transcript_language = window.language
+        row.transcript_is_automatic = window.is_automatic
+        self._reset_status(row)
+        outcome.source = TRANSCRIPT_SOURCE
 
         if self.gemini_disabled_reason:
             self._failure(row, GEMINI_UNAVAILABLE, self.gemini_disabled_reason)
             outcome.status = row.status
             outcome.error = row.status_reason
-            return outcome
+            return
         try:
             client = self.gemini_client()
             outcome.gemini_called = True
             self.gemini_calls += 1
-            result = client.analyze_youtube_video(
+            result = client.analyze_letsplay_transcript(
                 game_title=game.title,
-                video_url=candidate.url,
-                start_seconds=start_seconds,
-                end_seconds=end_seconds,
+                transcript=window.text,
+                language=window.language,
+                start_seconds=window.start_seconds,
+                end_seconds=window.end_seconds,
             )
-        except GeminiVideoUnavailable as exc:
-            self._mark_attempted(row)
-            self._failure(row, VIDEO_UNAVAILABLE, str(exc))
-            outcome.error = str(exc)
         except GeminiUnavailable as exc:
             self.gemini_disabled_reason = str(exc)
             self._failure(row, GEMINI_UNAVAILABLE, str(exc))
@@ -208,72 +342,139 @@ class YouTubeEnrichmentSession:
             self._failure(row, GEMINI_FAILED, str(exc))
             outcome.error = str(exc)
         except Exception as exc:  # a new SDK failure must remain isolated from the crawler
-            logger.exception("YouTube Gemini analysis crashed game=%s", game.id)
+            logger.exception("Transcript analysis crashed game=%s", game.id)
             self._failure(row, GEMINI_FAILED, f"{type(exc).__name__}: {exc}")
             outcome.error = row.status_reason
         else:
-            now = utc_now()
-            validated_liked = [
-                statement
+            self._store_result(row, result, transcript=window.text, extra=_window_details(window))
+        outcome.status = row.status
+
+    def _analyze_video(
+        self,
+        row: YouTubeAnalysis,
+        game: Game,
+        candidate: VideoCandidate,
+        outcome: YouTubeOutcome,
+    ) -> None:
+        """Send the video itself, only for a source that publishes no usable subtitles."""
+        if self.video_fallback_calls >= max(self.max_video_fallbacks, 0):
+            outcome.status = row.status
+            outcome.error = row.status_reason
+            return
+        if self.video_disabled_reason:
+            self._failure(row, GEMINI_UNAVAILABLE, self.video_disabled_reason)
+            outcome.status = row.status
+            outcome.error = row.status_reason
+            return
+
+        self._apply_candidate(row, candidate)
+        outcome.video_id = candidate.video_id
+        outcome.source = VIDEO_SOURCE
+        end_seconds = max(candidate.duration_seconds, 0)
+        start_seconds = max(0, end_seconds - self.fragment_minutes * 60)
+        row.fragment_start_seconds = start_seconds
+        row.fragment_end_seconds = end_seconds
+        row.transcript_language = None
+        row.transcript_is_automatic = None
+        self._reset_status(row)
+
+        try:
+            client = self.video_gemini_client()
+            outcome.gemini_called = True
+            self.video_fallback_calls += 1
+            result = client.analyze_youtube_video(
+                game_title=game.title,
+                video_url=candidate.url,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+            )
+        except GeminiVideoUnavailable as exc:
+            self._mark_attempted(row)
+            self._failure(row, VIDEO_UNAVAILABLE, str(exc))
+            outcome.error = str(exc)
+        except GeminiUnavailable as exc:
+            self.video_disabled_reason = str(exc)
+            self._failure(row, GEMINI_UNAVAILABLE, str(exc))
+            outcome.error = str(exc)
+        except GeminiTemporaryError as exc:
+            status = GEMINI_QUOTA_EXHAUSTED if _is_quota_error(exc) else GEMINI_FAILED
+            self._failure(row, status, str(exc))
+            outcome.error = str(exc)
+        except GeminiInvalidResponse as exc:
+            self._failure(row, GEMINI_FAILED, str(exc))
+            outcome.error = str(exc)
+        except Exception as exc:  # a new SDK failure must remain isolated from the crawler
+            logger.exception("YouTube video fallback crashed game=%s", game.id)
+            self._failure(row, GEMINI_FAILED, f"{type(exc).__name__}: {exc}")
+            outcome.error = row.status_reason
+        else:
+            self._store_result(row, result, transcript=result.speech_transcript, extra={})
+        outcome.status = row.status
+
+    def _store_result(
+        self,
+        row: YouTubeAnalysis,
+        result: YouTubeVideoResult,
+        *,
+        transcript: str,
+        extra: dict[str, Any],
+    ) -> None:
+        """Persist a result, keeping only the findings their own quote actually supports."""
+        now = utc_now()
+        validated_liked = [
+            statement
+            for statement, evidence in zip(result.liked, result.liked_evidence, strict=False)
+            if _evidence_is_in_transcript(evidence, transcript)
+        ]
+        validated_disliked = [
+            statement
+            for statement, evidence in zip(result.disliked, result.disliked_evidence, strict=False)
+            if _evidence_is_in_transcript(evidence, transcript)
+        ]
+        row.speech_transcript = transcript
+        row.summary = result.overall_impression
+        row.liked = validated_liked
+        row.disliked = validated_disliked
+        row.analysis_source = result.source
+        row.analysis_data = {
+            "prompt_version": result.prompt_version,
+            "source": result.source,
+            "has_useful_commentary": result.has_useful_commentary,
+            "overall_opinion_evidence": result.overall_opinion_evidence,
+            "overall_impression": result.overall_impression,
+            "liked": [
+                {"statement": statement, "speech_evidence": evidence}
                 for statement, evidence in zip(result.liked, result.liked_evidence, strict=False)
-                if _evidence_is_in_transcript(evidence, result.speech_transcript)
-            ]
-            validated_disliked = [
-                statement
+            ],
+            "disliked": [
+                {"statement": statement, "speech_evidence": evidence}
                 for statement, evidence in zip(
                     result.disliked, result.disliked_evidence, strict=False
                 )
-                if _evidence_is_in_transcript(evidence, result.speech_transcript)
-            ]
-            row.speech_transcript = result.speech_transcript
-            row.summary = result.overall_impression
-            row.liked = validated_liked
-            row.disliked = validated_disliked
-            row.analysis_data = {
-                "prompt_version": result.prompt_version,
-                "has_useful_commentary": result.has_useful_commentary,
-                "speech_transcript": result.speech_transcript,
-                "overall_opinion_evidence": result.overall_opinion_evidence,
-                "overall_impression": result.overall_impression,
-                "liked": [
-                    {"statement": statement, "speech_evidence": evidence}
-                    for statement, evidence in zip(
-                        result.liked, result.liked_evidence, strict=False
-                    )
-                ],
-                "disliked": [
-                    {"statement": statement, "speech_evidence": evidence}
-                    for statement, evidence in zip(
-                        result.disliked, result.disliked_evidence, strict=False
-                    )
-                ],
-                "validated_liked": validated_liked,
-                "validated_disliked": validated_disliked,
-            }
-            row.model_name = result.model
-            row.analyzed_at = now
-            row.updated_at = now
-            useful = (
-                result.has_useful_commentary
-                and bool(result.overall_impression)
-                and _evidence_is_in_transcript(
-                    result.overall_opinion_evidence, result.speech_transcript
-                )
-            )
-            if useful:
-                row.status = SUCCESS
-                row.status_reason = None
-                row.next_retry_at = None
-            else:
-                self._mark_attempted(row)
-                row.status = NO_USEFUL_COMMENTARY
-                row.status_reason = "The selected fragment contained no useful creator opinion"
-                row.next_retry_at = now + timedelta(hours=settings.youtube_retry_interval_hours)
-            outcome.status = row.status
+            ],
+            "validated_liked": validated_liked,
+            "validated_disliked": validated_disliked,
+            **extra,
+        }
+        row.model_name = result.model
+        row.analyzed_at = now
+        row.updated_at = now
+        useful = (
+            result.has_useful_commentary
+            and bool(result.overall_impression)
+            and _evidence_is_in_transcript(result.overall_opinion_evidence, transcript)
+        )
+        if useful:
+            row.status = SUCCESS
+            row.status_reason = None
+            row.next_retry_at = None
+        else:
+            self._mark_attempted(row)
+            row.status = NO_USEFUL_COMMENTARY
+            row.status_reason = "The selected fragment contained no useful creator opinion"
+            row.next_retry_at = now + timedelta(hours=settings.youtube_retry_interval_hours)
 
-        outcome.status = row.status
-        db.flush()
-        return outcome
+    # --- source selection ---------------------------------------------------------
 
     def _source_for_attempt(self, row: YouTubeAnalysis) -> VideoCandidate | None:
         if row.video_id and row.status in _RETRY_SAME_SOURCE:
@@ -293,6 +494,10 @@ class YouTubeEnrichmentSession:
             self._failure(row, YOUTUBE_UNAVAILABLE, self.youtube_disabled_reason)
             outcome.status = row.status
             outcome.error = row.status_reason
+            return None
+        if self.search_calls >= max(self.max_searches, 0):
+            # Not a failure: the game keeps its pending state and the next run searches.
+            outcome.status = SEARCH_BUDGET
             return None
         try:
             client = self.youtube_client()
@@ -354,8 +559,17 @@ class YouTubeEnrichmentSession:
             row.liked = None
             row.disliked = None
             row.analysis_data = None
+            row.analysis_source = None
+            row.transcript_language = None
+            row.transcript_is_automatic = None
             row.model_name = None
             row.analyzed_at = None
+
+    def _reset_status(self, row: YouTubeAnalysis) -> None:
+        row.status = PENDING
+        row.status_reason = None
+        row.next_retry_at = None
+        row.updated_at = utc_now()
 
     def _failure(self, row: YouTubeAnalysis, status: str, reason: str) -> None:
         now = utc_now()
@@ -373,6 +587,15 @@ class YouTubeEnrichmentSession:
             attempted.append(row.video_id)
         data["attempted_video_ids"] = attempted
         row.search_data = data
+
+
+def _window_details(window: TranscriptWindow) -> dict[str, Any]:
+    return {
+        "transcript_language": window.language,
+        "transcript_is_automatic": window.is_automatic,
+        "transcript_words": window.word_count,
+        "words_per_minute": round(window.words_per_minute, 1),
+    }
 
 
 def _next_cached_candidate(row: YouTubeAnalysis) -> VideoCandidate | None:

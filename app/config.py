@@ -59,9 +59,22 @@ class Settings(BaseSettings):
     # environment-owned; only the behavioural knobs below may be overridden in DB.
     google_cloud_api_key: str = ""
     youtube_analysis_enabled: bool = True
-    youtube_analysis_model: str = "gemini-3.5-flash"
+    # The main path reads captions with yt-dlp and analyses text, so the cheap high-quota
+    # Gemma model is enough; the multimodal model is only the fallback for videos that
+    # publish no usable captions at all.
+    youtube_analysis_model: str = "gemma-4-31b-it"
+    youtube_video_fallback_model: str = "gemini-3.5-flash"
     youtube_analysis_fragment_minutes: int = Field(default=15, ge=1, le=60)
-    youtube_analysis_max_games_per_run: int = Field(default=1, ge=0, le=50)
+    # Measured let's-play tails run 40-100 spoken words a minute (Russian sits at the low
+    # end). The bar is deliberately far below that: it only has to reject the anomaly —
+    # credits, menus, outro music, an idle camera — not rank ordinary quiet commentary.
+    youtube_transcript_min_words_per_minute: int = Field(default=15, ge=1, le=400)
+    youtube_transcript_timeout_seconds: float = Field(default=60.0, gt=0)
+    youtube_analysis_max_games_per_run: int = Field(default=5, ge=0, le=50)
+    # search.list costs 100 of the 10 000 daily Data API units; capping searches per run
+    # keeps 24 hourly runs inside the quota no matter how large the backlog is.
+    youtube_max_searches_per_run: int = Field(default=3, ge=0, le=50)
+    youtube_max_video_fallbacks_per_run: int = Field(default=1, ge=0, le=10)
     youtube_search_max_results: int = Field(default=25, ge=5, le=50)
     youtube_retry_interval_hours: int = Field(default=24, ge=1)
     youtube_no_result_refresh_days: int = Field(default=30, ge=1)
