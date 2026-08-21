@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Activity · {{ app_name }}{% endblock %}
+{% block content %}
+  <div class="page-heading">
+    <div><h1>Activity</h1><p class="muted">Manual processing runs and worker availability.</p></div>
+    <form method="post" action="/activity/runs">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-primary" type="submit">Start processing</button>
+    </form>
+  </div>
+
+  <section class="section">
+    <div class="section-heading"><h2>Workers</h2><span class="live-indicator" id="live-state">Connecting live status…</span></div>
+    <div class="worker-list" id="workers">
+      {% for worker in workers %}
+        <div class="worker-row"><strong>{{ worker.worker_id }}</strong><span>Last heartbeat {{ worker.last_seen_at.strftime('%Y-%m-%d %H:%M:%S') }}</span><span>{{ worker.current_run_id or 'Idle' }}</span></div>
+      {% else %}<p class="empty-copy">No worker heartbeat received.</p>{% endfor %}
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Processing runs</h2>
+    <div class="table-wrap">
+      <table id="runs-table">
+        <thead><tr><th>Created</th><th>Trigger</th><th>Status</th><th>Worker</th><th>Message</th></tr></thead>
+        <tbody>
+          {% for run in runs %}
+            <tr data-run-id="{{ run.id }}">
+              <td class="nowrap">{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td>{{ run.trigger.value }}</td>
+              <td><span class="status status-{{ run.status.value }}" data-field="status">{{ run.status.value }}</span></td>
+              <td data-field="worker_id">{{ run.worker_id or '—' }}</td>
+              <td data-field="message">{{ run.message or '—' }}</td>
+            </tr>
+          {% else %}<tr><td colspan="5" class="empty-state">No processing runs yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <script>window.GameRateActivity = true;</script>
+{% endblock %}
+

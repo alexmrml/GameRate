@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}{{ game.title }} · {{ app_name }}{% endblock %}
+{% block content %}
+  <a class="back-link" href="/games">Back to games</a>
+  <div class="page-heading detail-heading">
+    <div>
+      <h1>{{ game.title }}</h1>
+      <p class="muted">
+        {% if game.release_date %}Released {{ game.release_date }} · {% endif %}
+        Updated {{ game.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC
+      </p>
+    </div>
+    {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Open source</a>{% endif %}
+  </div>
+
+  {% if game.description %}<p class="lead">{{ game.description }}</p>{% endif %}
+
+  <section class="section">
+    <h2>Platform scores</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Platform</th><th>Metascore</th><th>Userscore</th><th>Critic reviews</th><th>User ratings</th></tr></thead>
+        <tbody>
+          {% for item in game.platforms %}
+            <tr><td>{{ item.platform.name }}</td><td>{{ item.metascore if item.metascore is not none else '—' }}</td><td>{{ item.userscore if item.userscore is not none else '—' }}</td><td>{{ item.critic_review_count or '—' }}</td><td>{{ item.user_rating_count or '—' }}</td></tr>
+          {% else %}<tr><td colspan="5" class="empty-state">No platform scores yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="two-column">
+    <section class="section">
+      <h2>Review summaries</h2>
+      {% for item in game.review_summaries %}
+        <article class="text-block"><h3>{{ item.audience.value | title }}</h3><p>{{ item.summary }}</p><span class="muted">Based on {{ item.source_count }} sources</span></article>
+      {% else %}<p class="empty-copy">No review summaries yet.</p>{% endfor %}
+    </section>
+    <section class="section">
+      <h2>YouTube analysis</h2>
+      {% for item in game.youtube_analyses %}
+        <article class="text-block"><h3>{{ item.video_title or item.video_id }}</h3><p>{{ item.summary or 'Analysis pending.' }}</p></article>
+      {% else %}<p class="empty-copy">No YouTube analysis yet.</p>{% endfor %}
+    </section>
+  </div>
+{% endblock %}
+

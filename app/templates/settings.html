@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ app_name }}{% endblock %}
+{% block content %}
+  <div class="page-heading"><div><h1>Settings</h1><p class="muted">Runtime application values stored in PostgreSQL.</p></div></div>
+  <div class="settings-layout">
+    <section class="section">
+      <h2>Stored values</h2>
+      <div class="definition-list">
+        {% for item in settings %}
+          <div><dt>{{ item.key }}</dt><dd><code>{{ item.value }}</code></dd><span class="muted">{{ item.updated_at.strftime('%Y-%m-%d %H:%M') }}</span></div>
+        {% else %}<p class="empty-copy">No database-backed settings yet.</p>{% endfor %}
+      </div>
+    </section>
+    <section class="section form-section">
+      <h2>Add or update</h2>
+      <form class="stack" method="post" action="/settings">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label><span>Key</span><input name="key" placeholder="daily_crawl_enabled" required maxlength="120"></label>
+        <label><span>JSON value or text</span><textarea name="value" rows="5" placeholder="true" required></textarea></label>
+        <button class="button button-primary" type="submit">Save setting</button>
+      </form>
+      <p class="form-help">Environment-owned values such as APP_TIMEZONE remain read-only here. Current timezone: <code>{{ app_timezone }}</code>.</p>
+    </section>
+  </div>
+{% endblock %}
+

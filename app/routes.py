@@ -1,0 +1,309 @@
+import asyncio
+import json
+import uuid
+from collections.abc import AsyncIterator
+from datetime import timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session, selectinload
+
+from app.auth import (
+    AuthContext,
+    clear_session_cookie,
+    create_session,
+    find_auth_context,
+    require_auth,
+    require_csrf,
+    set_session_cookie,
+)
+from app.config import settings
+from app.db import SessionLocal, get_db
+from app.models import (
+    AppSetting,
+    Game,
+    GamePlatform,
+    Platform,
+    ProcessingRun,
+    User,
+    UserSession,
+    WorkerHeartbeat,
+)
+from app.security import verify_password
+from app.services.runs import enqueue_manual_run
+from app.templates import templates
+from app.time import utc_now
+
+router = APIRouter()
+
+
+def page_context(request: Request, auth: AuthContext, **extra: object) -> dict[str, object]:
+    return {
+        "request": request,
+        "current_user": auth.user,
+        "csrf_token": auth.session.csrf_token,
+        **extra,
+    }
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)) -> dict[str, object]:
+    db.execute(text("SELECT 1"))
+    cutoff = utc_now() - timedelta(seconds=settings.worker_stale_seconds)
+    active_workers = db.scalar(
+        select(func.count())
+        .select_from(WorkerHeartbeat)
+        .where(WorkerHeartbeat.last_seen_at >= cutoff)
+    )
+    return {"status": "ok", "database": "ok", "active_workers": active_workers or 0}
+
+
+@router.get("/login", response_class=HTMLResponse)
+def login_page(
+    request: Request, next: str = "/games", db: Session = Depends(get_db)
+) -> HTMLResponse:
+    if find_auth_context(request, db):
+        return RedirectResponse("/games", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={"next": next, "error": None},
+    )
+
+
+@router.post("/login", response_class=HTMLResponse)
+def login(
+    request: Request,
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    next: Annotated[str, Form()] = "/games",
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    user = db.scalar(select(User).where(User.username == username.strip()))
+    if user is None or not user.is_active or not verify_password(password, user.password_hash):
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"next": next, "error": "Invalid username or password"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    _, raw_token = create_session(db, user)
+    destination = next if next.startswith("/") and not next.startswith("//") else "/games"
+    response = RedirectResponse(destination, status_code=status.HTTP_303_SEE_OTHER)
+    set_session_cookie(response, raw_token)
+    return response
+
+
+@router.post("/logout")
+def logout(
+    csrf_token: Annotated[str, Form()],
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_csrf(csrf_token, auth)
+    session = db.get(UserSession, auth.session.id)
+    if session:
+        db.delete(session)
+        db.commit()
+    response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    clear_session_cookie(response)
+    return response
+
+
+@router.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse("/games", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/games", response_class=HTMLResponse)
+def games_page(
+    request: Request,
+    q: str = "",
+    platform: str = "",
+    sort: str = Query(default="updated", pattern="^(title|updated|metascore|userscore)$"),
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    platform_rows = db.scalars(select(Platform).order_by(Platform.name)).all()
+    stmt = select(Game).options(selectinload(Game.platforms).selectinload(GamePlatform.platform))
+    if q:
+        stmt = stmt.where(Game.title.ilike(f"%{q.strip()}%"))
+    if platform:
+        stmt = stmt.where(Game.platforms.any(GamePlatform.platform.has(Platform.slug == platform)))
+    if sort == "title":
+        stmt = stmt.order_by(Game.title.asc())
+    elif sort in {"metascore", "userscore"}:
+        score_column = (
+            func.max(GamePlatform.metascore)
+            if sort == "metascore"
+            else func.max(GamePlatform.userscore)
+        )
+        stmt = (
+            stmt.outerjoin(GamePlatform)
+            .group_by(Game.id)
+            .order_by(score_column.desc().nullslast(), Game.title)
+        )
+    else:
+        stmt = stmt.order_by(Game.updated_at.desc())
+    games = db.scalars(stmt).unique().all()
+    return templates.TemplateResponse(
+        request=request,
+        name="games.html",
+        context=page_context(
+            request,
+            auth,
+            games=games,
+            platforms=platform_rows,
+            filters={"q": q, "platform": platform, "sort": sort},
+        ),
+    )
+
+
+@router.get("/games/{game_id}", response_class=HTMLResponse)
+def game_detail(
+    request: Request,
+    game_id: uuid.UUID,
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    game = db.scalar(
+        select(Game)
+        .where(Game.id == game_id)
+        .options(
+            selectinload(Game.platforms).selectinload(GamePlatform.platform),
+            selectinload(Game.genres),
+            selectinload(Game.tags),
+            selectinload(Game.review_summaries),
+            selectinload(Game.youtube_analyses),
+        )
+    )
+    if game is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Game not found")
+    return templates.TemplateResponse(
+        request=request,
+        name="game_detail.html",
+        context=page_context(request, auth, game=game),
+    )
+
+
+@router.get("/activity", response_class=HTMLResponse)
+def activity_page(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    runs = db.scalars(
+        select(ProcessingRun).order_by(ProcessingRun.created_at.desc()).limit(100)
+    ).all()
+    workers = db.scalars(
+        select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())
+    ).all()
+    return templates.TemplateResponse(
+        request=request,
+        name="activity.html",
+        context=page_context(request, auth, runs=runs, workers=workers),
+    )
+
+
+@router.post("/activity/runs")
+def create_run(
+    csrf_token: Annotated[str, Form()],
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_csrf(csrf_token, auth)
+    enqueue_manual_run(db, auth.user.id)
+    return RedirectResponse("/activity", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def run_snapshot() -> dict[str, object]:
+    with SessionLocal() as db:
+        runs = db.scalars(
+            select(ProcessingRun).order_by(ProcessingRun.created_at.desc()).limit(20)
+        ).all()
+        workers = db.scalars(
+            select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())
+        ).all()
+        return {
+            "runs": [
+                {
+                    "id": str(run.id),
+                    "status": run.status.value,
+                    "message": run.message,
+                    "worker_id": run.worker_id,
+                    "updated_at": run.updated_at.isoformat(),
+                }
+                for run in runs
+            ],
+            "workers": [
+                {
+                    "worker_id": worker.worker_id,
+                    "last_seen_at": worker.last_seen_at.isoformat(),
+                    "current_run_id": str(worker.current_run_id) if worker.current_run_id else None,
+                }
+                for worker in workers
+            ],
+        }
+
+
+@router.get("/activity/events")
+async def activity_events(
+    request: Request,
+    _auth: AuthContext = Depends(require_auth),
+) -> StreamingResponse:
+    async def events() -> AsyncIterator[str]:
+        while not await request.is_disconnected():
+            yield f"event: activity\ndata: {json.dumps(run_snapshot())}\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_page(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    setting_rows = db.scalars(select(AppSetting).order_by(AppSetting.key)).all()
+    return templates.TemplateResponse(
+        request=request,
+        name="settings.html",
+        context=page_context(request, auth, settings=setting_rows),
+    )
+
+
+@router.post("/settings")
+def update_setting(
+    key: Annotated[str, Form()],
+    value: Annotated[str, Form()],
+    csrf_token: Annotated[str, Form()],
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_csrf(csrf_token, auth)
+    normalized_key = key.strip()
+    if not normalized_key or len(normalized_key) > 120:
+        raise HTTPException(status_code=422, detail="Invalid setting key")
+    try:
+        parsed_value = json.loads(value)
+    except json.JSONDecodeError:
+        parsed_value = value
+    row = db.get(AppSetting, normalized_key)
+    now = utc_now()
+    if row is None:
+        row = AppSetting(key=normalized_key, value=parsed_value, updated_at=now)
+        db.add(row)
+    else:
+        row.value = parsed_value
+        row.updated_at = now
+    row.updated_by_id = auth.user.id
+    db.commit()
+    return RedirectResponse("/settings", status_code=status.HTTP_303_SEE_OTHER)
