@@ -104,7 +104,7 @@ TUNABLES: tuple[TunableSetting, ...] = (
         "youtube.max_searches_per_run",
         int,
         "youtube_max_searches_per_run",
-        "YouTube Data API searches per run; each costs 100 of the 10 000 daily units",
+        "YouTube Data API searches per run; the search allowance is about 100 calls a day",
     ),
     TunableSetting(
         "youtube.max_video_fallbacks_per_run",

@@ -125,10 +125,45 @@ Web and worker share configuration and models but no process memory.
   `no_useful_commentary`, plus the complete candidate cache and attempted video IDs. Do not
   replace this with in-memory retry state or search again while `next_retry_at` is ahead.
 - Discovery makes exactly one popularity-ordered `search.list` call and one batched
-  `videos.list` call per search. It does not use `videoDuration`; Shorts and irrelevant
-  formats are rejected after metadata hydration, then the suitable candidate with the
-  highest `viewCount` wins. A failed/silent source advances through cached candidates
+  `videos.list` call per search, and asks for the full 50 results — one search costs the
+  same at any depth. It does not use `videoDuration`. Candidates are filtered after metadata
+  hydration, then the eligible candidate with the highest `viewCount` wins. Eligibility is a
+  yes/no test, never a score: the most-viewed survivor is the answer, so a "quality" ranking
+  would have nowhere to live. A failed/silent source advances through cached candidates
   before another search is allowed.
+- **YouTube loses recall as a quoted OR-chain grows.** Measured against one game: 1 branch
+  returned 22-25 results, 3 returned 25, 4 returned 7, and the 7 branches this project used
+  to send returned **1**. That single fact caused most `no_candidate` results — the search
+  starved before any filter ran. `MAX_QUERY_BRANCHES` caps the query at three; do not add a
+  fourth term "for coverage", it removes coverage. The searched name is `search_title()`:
+  the game's name minus bracketed suffixes and edition labels.
+- Rejection rules, in the order they fire, each earning its place against real results:
+  `shorts`, `too_short` (under 8 minutes — this alone removes trailers, teasers and clipped
+  highlights without a keyword), `not_gaming` (YouTube's own category 20, which is what
+  separates the game *Gallipoli* from the battle documentary and *Superposition* from the
+  circuit-theory lecture; it rides along in the snippet already fetched), `different_game`,
+  the `_REJECT_TERMS` list, then `no_commentary`.
+- The filter used to require a positive "gameplay" signal from *every* candidate. That is
+  what silently deleted small channels, whose titles often say only the game's name, and it
+  is now applied **only** to ambiguous names. `demo`, `beta` and `early access` were also
+  dropped from the reject list: for a game released last week, a demo playthrough is often
+  the only let's-play with live commentary that exists. Publisher B-roll (`gameplay demo`,
+  `official gameplay`, `gameplay reveal`) is still rejected. So is a finale — `ending` was
+  removed from the list, since the end of a playthrough is where opinions actually land.
+- `_matches_game` compares **contiguous phrases**, not token coverage. The old 80%-of-tokens
+  rule let "Dragon's Dogma 2 ... chef-d'oeuvre" satisfy the game *Chef's Dogma*. Variants
+  cover dotted acronyms (`S.T.A.L.K.E.R. 2` ↔ `STALKER 2`) and roman numerals
+  (`Mortal Shell II` ↔ `Mortal Shell 2`), and a trailing sequel marker is checked so
+  *Mortal Shell* does not claim every *Mortal Shell II* video.
+- A name of one or two ordinary words identifies nothing by itself, so those and only those
+  must additionally: head one of the first two title segments, not sit behind a chapter
+  counter (`JUSANT - Chapter 1 - Daymark` is Jusant), carry a playthrough signal, and name
+  the game in the description too. **Known limitation:** when such a name is also a level,
+  map or quest in a bigger game and that game's video says the word everywhere — *Gallipoli*
+  as a Battlefield 1 map, *Superposition* as a Marvel Contest of Champions quest — no
+  text-only rule separates them. `topicCategories` was checked and is genre-level only, so
+  it cannot help. Two of thirty sampled games still pick the wrong game this way; prefer
+  leaving it than adding heuristics that cost the twenty-five that work.
 - **The main path is subtitles, not video.** `app/collectors/transcript.py` uses yt-dlp with
   `download=False` to read the player response, then fetches the `json3` timed-text track
   over plain HTTP. No video or audio stream is ever downloaded and no temporary file is
@@ -159,14 +194,27 @@ Web and worker share configuration and models but no process memory.
 - Reading subtitles makes no model call, so one game may walk up to `MAX_TRANSCRIPT_ATTEMPTS`
   cached candidates looking for one with captions before the fallback budget is spent. One
   game still yields at most one summary, from one video.
+- yt-dlp breaking on a video says nothing about whether Gemini can watch it, so a technical
+  caption failure must not lock a game out of the fallback for good. After
+  `TRANSCRIPT_ERRORS_BEFORE_FALLBACK` (2) consecutive failures on the same source it becomes
+  fallback-eligible; one plain retry comes first, because a single timeout is far likelier
+  to be a blip than a permanent obstacle and the fallback budget is the scarce one. The
+  streak resets when a read succeeds or the candidate changes.
 - Output is speech-grounded. The overall conclusion and each liked/disliked point carry
   verbatim speech evidence; only evidence found in the stored transcript is accepted.
   Tutorial steps, useful items and momentary frustration are not an overall game opinion. A
   source without a supported overall view is `no_useful_commentary`, not a fabricated summary.
-- `youtube.max_searches_per_run` (3) exists because `search.list` costs 100 of the 10 000
-  daily Data API units: 24 hourly runs times 5 games would exceed the quota. Hitting the cap
-  yields the non-persisted `search_budget` outcome, which leaves the game pending for the
-  next run instead of burning its retry window.
+- The YouTube phase works the backlog **reviewed games first** (`enrich_youtube_games` sorts
+  by critic review count, then by whether the run collected the game). It is a sort, not a
+  filter: an unreviewed game still comes up once the reviewed backlog is clear. Without it a
+  catalogue that is ~85% brand-new indie releases spends every run on titles nobody has
+  published a let's-play of.
+- `youtube.max_searches_per_run` (3) exists because `search.list` draws on its own daily
+  allowance of roughly **100 calls**, separate from the units the other endpoints spend —
+  confirmed by exhausting it during filter work. It is the scarce resource here, not the
+  10 000-unit figure quoted earlier in this file's history. Three per run keeps 24 hourly
+  runs at 72 a day. Hitting the cap yields the non-persisted `search_budget` outcome, which
+  leaves the game pending for the next run instead of burning its retry window.
 - `GOOGLE_CLOUD_API_KEY` and `GEMINI_API_KEY` are environment-only. YouTube feature/model/
   fragment/density/batch tunables use `app/services/app_settings.py`; no YouTube failure may
   fail the crawl or stop ordinary Gemini enrichment.
@@ -201,16 +249,17 @@ Auth, catalogue and detail pages, activity queue with SSE progress, settings, he
 heartbeat, Compose, CI, the Metacritic pipeline, Gemini review/tag enrichment, weighted similar
 games, and YouTube let's-play discovery/subtitle analysis are in place. Model output is Russian.
 
-Next work, in the order it matters:
+Discovery was measured on a 30-game sample drawn from the live catalogue; the numbers and the
+rejection-reason breakdown are in the YouTube section above. Next work, in the order it matters:
 
 - **Interface translation.** Only generated text is Russian today; every template label, status
   string, table header and empty-state sentence in `app/templates/` is still English, and the
   `status.replace('_', ' ')` rendering on the detail page prints raw status slugs at the user.
   Decide whether statuses get a display map or the UI stops showing them before translating.
-- **Discovery quality.** The subtitle path is cheap enough that discovery is now the bottleneck:
-  live runs return `no_candidate` for most freshly released indie games, because
-  `candidate_rejection_reason` demands a positive gameplay signal that small-channel let's-plays
-  often lack. Loosening it is a change to `app/collectors/youtube.py`, not to the analysis path.
+- **Discovery accuracy for one-word names.** Rewritten and measured on a 30-game sample from
+  the live catalogue: 27 now select a video (was 20), 0 videos are eligible for more than one
+  game, and the surviving errors are the *Gallipoli* / *Superposition* class described above.
+  Anything further needs a game-entity vocabulary, not another keyword.
 - **Prompt-version backlog.** `PROMPT_VERSION` and `YOUTUBE_PROMPT_VERSION` were both bumped, so
   every stored summary is stale and regenerates at `ai.max_games_per_run` (20) per run; a ~190
   game catalogue takes about ten runs to come back. That is by design — do not bulk-edit rows.

@@ -89,12 +89,19 @@ each shows its environment default, any override, and the value in force.
 ## YouTube let's-play analysis
 
 The same processing run also fills a separate let's-play perspective for games that do not yet
-have a useful result. Discovery makes one popularity-ordered YouTube Data API search per game,
-hydrates all returned metadata in one `videos.list`, rejects trailers, reviews, guides, demos,
-soundtracks, cutscenes, Shorts, no-commentary videos and similar false positives, then chooses
-the remaining video with the most views. Empty searches and provider errors are persisted, so an
-hourly run does not repeat them immediately; candidates are cached so a silent or unavailable
-video can advance to the next result without another search.
+have a useful result. Games that critics have reviewed are worked through first, so a catalogue
+full of brand-new indie releases does not spend every run on titles nobody has filmed.
+
+Discovery makes one popularity-ordered YouTube Data API search per game, hydrates all returned
+metadata in one `videos.list`, then rejects everything that is not one creator playing this game
+and talking about it: anything under eight minutes, Shorts, videos YouTube does not file under
+Gaming, trailers, reviews, guides, collectible runs, compilations, cutscene movies, mod footage
+and videos advertising no commentary. The most-viewed survivor wins. A playthrough of a demo now
+counts — for a game released last week it is often the only let's-play that exists.
+
+Empty searches and provider errors are persisted, so an hourly run does not repeat them
+immediately; candidates are cached so a silent or unavailable video can advance to the next
+result without another search.
 
 The analysis itself reads the video's **subtitles**, not the video. yt-dlp fetches the caption
 track — the creator's own subtitles when they exist, otherwise YouTube's automatic ones — without
@@ -108,8 +115,10 @@ earlier, a creator who talks to the last second is analysed at the very end. Tha
 games per run.
 
 If a video publishes no usable subtitles at all — a "no commentary" walkthrough, for instance —
-the app falls back to sending the video itself to a multimodal Gemini model. That call is slow
-and quota-hungry, so it is capped at one per run; the subtitle path is not.
+the app falls back to sending the video itself to a multimodal Gemini model. The same fallback
+catches a video whose subtitles keep failing to download for technical reasons, so a broken
+caption read never denies a game an analysis outright. That call is slow and quota-hungry, so it
+is capped at one per run; the subtitle path is not.
 
 Results are written in Russian regardless of the video's language, while the quoted evidence stays
 in the creator's own words. The structured response keeps an overall impression, liked/disliked
@@ -130,8 +139,8 @@ can change every knob below the key rows without exposing either provider key.
 | `YOUTUBE_ANALYSIS_FRAGMENT_MINUTES` | Length of the analyzed fragment near the end |
 | `YOUTUBE_TRANSCRIPT_MIN_WORDS_PER_MINUTE` | Speech rate below which a fragment counts as silence |
 | `YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN` | Backlog cap per processing run (default 5) |
-| `YOUTUBE_MAX_SEARCHES_PER_RUN` | Data API searches per run; each costs 100 of 10 000 daily units |
+| `YOUTUBE_MAX_SEARCHES_PER_RUN` | Data API searches per run; the search allowance is ~100 calls a day |
 | `YOUTUBE_MAX_VIDEO_FALLBACKS_PER_RUN` | Multimodal video calls per run (default 1) |
-| `YOUTUBE_SEARCH_MAX_RESULTS` | Candidates fetched by the single search request |
+| `YOUTUBE_SEARCH_MAX_RESULTS` | Candidates fetched by the single search request (50 costs no more than 5) |
 | `YOUTUBE_RETRY_INTERVAL_HOURS` | Delay after provider/source failures |
 | `YOUTUBE_NO_RESULT_REFRESH_DAYS` | When an empty search may be repeated |
