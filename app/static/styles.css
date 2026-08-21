@@ -116,3 +116,23 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--surface); font-fa
 .detail-identity { display: flex; align-items: flex-start; gap: 20px; }
 .detail-actions { display: flex; gap: 10px; align-items: flex-start; }
 .chip { padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--muted); }
+.badge-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.badge { padding: 2px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+.badge:hover { border-color: var(--accent); color: var(--accent); }
+.badge-lead { border-color: var(--accent); color: var(--text); font-weight: 640; }
+.score-cell strong { font-size: 16px; }
+.score-cell .table-subtitle { display: block; }
+.chip-genre { border-color: var(--accent); color: var(--text); }
+.chip-small { font-size: 10px; padding: 1px 6px; }
+.verdict { font-weight: 680; margin: 0 0 8px; }
+.insight-list { margin: 6px 0 14px; padding-left: 18px; }
+.insight-list li { margin-bottom: 4px; }
+.insight-list li.liked::marker { content: "+ "; color: var(--success); }
+.insight-list li.disliked::marker { content: "− "; color: var(--danger); }
+.section h4 { margin: 14px 0 2px; font-size: 13px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.similar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.similar-card { display: flex; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); text-decoration: none; color: inherit; }
+.similar-card:hover { border-color: var(--accent); box-shadow: var(--shadow); }
+.similar-card strong { display: block; }
+.match-score { font-size: 12px; color: var(--accent); }
+.reason-list { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--muted); }

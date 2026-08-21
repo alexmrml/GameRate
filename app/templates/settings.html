@@ -2,6 +2,27 @@
 {% block title %}Settings · {{ app_name }}{% endblock %}
 {% block content %}
   <div class="page-heading"><div><h1>Settings</h1><p class="muted">Runtime application values stored in PostgreSQL.</p></div></div>
+  <section class="section">
+    <h2>AI enrichment</h2>
+    <p class="muted">These control how often the worker calls Gemini. The environment supplies the default; saving a value with the same key below overrides it without a restart. The API key itself is environment-only and never shown here.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Key</th><th>In force</th><th>Default (env)</th><th>Override</th><th>What it does</th></tr></thead>
+        <tbody>
+          {% for item in tunables %}
+            <tr>
+              <td><code>{{ item.key }}</code></td>
+              <td><strong>{{ item.effective }}</strong></td>
+              <td>{{ item.default }}</td>
+              <td>{{ item.override if item.override is not none else '—' }}</td>
+              <td class="muted">{{ item.description }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <div class="settings-layout">
     <section class="section">
       <h2>Stored values</h2>
@@ -15,7 +36,7 @@
       <h2>Add or update</h2>
       <form class="stack" method="post" action="/settings">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label><span>Key</span><input name="key" placeholder="daily_crawl_enabled" required maxlength="120"></label>
+        <label><span>Key</span><input name="key" placeholder="ai.min_refresh_interval_hours" required maxlength="120"></label>
         <label><span>JSON value or text</span><textarea name="value" rows="5" placeholder="true" required></textarea></label>
         <button class="button button-primary" type="submit">Save setting</button>
       </form>

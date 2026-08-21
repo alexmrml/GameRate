@@ -4,7 +4,7 @@
   <div class="page-heading">
     <div>
       <h1>Games</h1>
-      <p class="muted">Discovered games and their latest platform scores.</p>
+      <p class="muted">Discovered games with the score of their lead platform — the one with the most critic reviews.</p>
     </div>
   </div>
 
@@ -25,47 +25,55 @@
     <label>
       <span class="sr-only">Sort</span>
       <select name="sort">
-        <option value="updated" {% if filters.sort == 'updated' %}selected{% endif %}>Sort by updated</option>
+        <option value="released" {% if filters.sort == 'released' %}selected{% endif %}>Sort by release date</option>
         <option value="title" {% if filters.sort == 'title' %}selected{% endif %}>Sort by title</option>
         <option value="metascore" {% if filters.sort == 'metascore' %}selected{% endif %}>Sort by Metascore</option>
         <option value="userscore" {% if filters.sort == 'userscore' %}selected{% endif %}>Sort by Userscore</option>
       </select>
     </label>
     <button class="button" type="submit">Apply</button>
-    {% if filters.q or filters.platform or filters.sort != 'updated' %}<a class="button button-quiet" href="/games">Reset</a>{% endif %}
+    {% if filters.q or filters.platform or filters.sort != 'released' %}<a class="button button-quiet" href="/games">Reset</a>{% endif %}
   </form>
 
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Game</th><th>Platforms</th><th>Metascore</th><th>Userscore</th><th>Updated</th></tr>
+        <tr><th>Game</th><th>Platforms</th><th>Metascore</th><th>Userscore</th><th>Released</th></tr>
       </thead>
       <tbody>
-        {% for game in games %}
+        {% for row in rows %}
+          {% set game = row.game %}
+          {% set lead = row.lead %}
           <tr>
             <td>
               <div class="title-cell">
                 {% if game.cover_image_url %}<img class="cover" src="{{ game.cover_image_url }}" alt="" loading="lazy">{% endif %}
                 <div>
                   <a class="table-title" href="/games/{{ game.id }}">{{ game.title }}</a>
-                  {% if game.release_date %}<span class="table-subtitle">{{ game.release_date }}</span>{% endif %}
+                  {% if game.developer %}<span class="table-subtitle">{{ game.developer }}</span>{% endif %}
                 </div>
               </div>
             </td>
             <td>
-              <div class="inline-list">
-                {% for item in game.platforms %}<span>{{ item.platform.name }}</span>{% else %}<span class="muted">—</span>{% endfor %}
+              <div class="badge-list">
+                {% for item in game.platforms %}
+                  <a class="badge {% if lead and item.platform_id == lead.platform_id %}badge-lead{% endif %}"
+                     href="/games?platform={{ item.platform.slug }}"
+                     title="Filter by {{ item.platform.name }}{% if lead and item.platform_id == lead.platform_id %} · lead platform{% endif %}">{{ item.platform.name }}</a>
+                {% else %}<span class="muted">—</span>{% endfor %}
               </div>
             </td>
-            <td>
-              {% set scores = game.platforms | selectattr('metascore', 'ne', none) | map(attribute='metascore') | list %}
-              {{ scores|max if scores else '—' }}
+            <td class="score-cell">
+              {% if lead and lead.metascore is not none %}
+                <strong>{{ lead.metascore }}</strong><span class="table-subtitle">{{ lead.platform.name }}</span>
+              {% else %}<span class="muted" title="Metacritic has no score yet">not rated</span>{% endif %}
             </td>
-            <td>
-              {% set scores = game.platforms | selectattr('userscore', 'ne', none) | map(attribute='userscore') | list %}
-              {{ scores|max if scores else '—' }}
+            <td class="score-cell">
+              {% if lead and lead.userscore is not none %}
+                <strong>{{ lead.userscore }}</strong><span class="table-subtitle">{{ lead.platform.name }}</span>
+              {% else %}<span class="muted" title="Metacritic has no score yet">not rated</span>{% endif %}
             </td>
-            <td class="nowrap">{{ game.updated_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td class="nowrap">{{ game.release_date if game.release_date else '—' }}</td>
           </tr>
         {% else %}
           <tr><td colspan="5" class="empty-state">No games match these filters.</td></tr>
@@ -74,4 +82,3 @@
     </table>
   </div>
 {% endblock %}
-

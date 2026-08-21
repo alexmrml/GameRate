@@ -2,8 +2,8 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
-from typing import Annotated
+from datetime import date, timedelta
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
@@ -34,7 +34,9 @@ from app.models import (
     WorkerHeartbeat,
 )
 from app.security import verify_password
+from app.services.app_settings import describe_settings
 from app.services.runs import enqueue_manual_run
+from app.services.similarity import lead_platform, rank_similar
 from app.templates import templates
 from app.time import utc_now
 
@@ -125,7 +127,7 @@ def games_page(
     request: Request,
     q: str = "",
     platform: str = "",
-    sort: str = Query(default="updated", pattern="^(title|updated|metascore|userscore)$"),
+    sort: str = Query(default="released", pattern="^(title|released|metascore|userscore)$"),
     auth: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -135,29 +137,46 @@ def games_page(
         stmt = stmt.where(Game.title.ilike(f"%{q.strip()}%"))
     if platform:
         stmt = stmt.where(Game.platforms.any(GamePlatform.platform.has(Platform.slug == platform)))
+    games = list(db.scalars(stmt).unique())
+
+    # One score represents a game everywhere: the lead platform's, chosen in app.services
+    # .similarity. Sorting therefore happens on the same value the row displays, which SQL
+    # aggregates cannot express, so the ordering is applied here.
+    rows = [
+        {
+            "game": game,
+            "lead": lead_platform(game),
+            "release_date": game.release_date,
+        }
+        for game in games
+    ]
     if sort == "title":
-        stmt = stmt.order_by(Game.title.asc())
+        rows.sort(key=lambda row: row["game"].title.casefold())
+    elif sort == "released":
+        rows.sort(
+            key=lambda row: (row["release_date"] is not None, row["release_date"] or date.min),
+            reverse=True,
+        )
     elif sort in {"metascore", "userscore"}:
-        score_column = (
-            func.max(GamePlatform.metascore)
-            if sort == "metascore"
-            else func.max(GamePlatform.userscore)
-        )
-        stmt = (
-            stmt.outerjoin(GamePlatform)
-            .group_by(Game.id)
-            .order_by(score_column.desc().nullslast(), Game.title)
-        )
+
+        def score_of(row: dict[str, object]) -> tuple[int, float]:
+            lead = row["lead"]
+            value = None if lead is None else getattr(lead, sort)
+            # Unrated games sort last on their own rank; no placeholder score is invented.
+            return (0, 0.0) if value is None else (1, float(value))
+
+        rows.sort(key=lambda row: row["game"].title.casefold())
+        rows.sort(key=score_of, reverse=True)
     else:
-        stmt = stmt.order_by(Game.updated_at.desc())
-    games = db.scalars(stmt).unique().all()
+        rows.sort(key=lambda row: row["game"].updated_at, reverse=True)
+
     return templates.TemplateResponse(
         request=request,
         name="games.html",
         context=page_context(
             request,
             auth,
-            games=games,
+            rows=rows,
             platforms=platform_rows,
             filters={"q": q, "platform": platform, "sort": sort},
         ),
@@ -203,6 +222,21 @@ def game_detail(
             .group_by(GameReview.audience)
         ).all()
     )
+    summaries = {item.audience: item for item in game.review_summaries if item.platform_id is None}
+
+    # Similarity is plain weighted arithmetic over the loaded catalogue, so the neighbours
+    # are always current instead of a stored snapshot that ages as games are added.
+    candidates = list(
+        db.scalars(
+            select(Game).options(
+                selectinload(Game.tags),
+                selectinload(Game.genres),
+                selectinload(Game.platforms).selectinload(GamePlatform.platform),
+            )
+        ).unique()
+    )
+    similar = rank_similar(game, candidates, limit=settings.similar_games_limit)
+
     return templates.TemplateResponse(
         request=request,
         name="game_detail.html",
@@ -210,12 +244,24 @@ def game_detail(
             request,
             auth,
             game=game,
+            lead=lead_platform(game),
             critic_reviews=latest_reviews(Audience.CRITICS),
             user_reviews=latest_reviews(Audience.USERS),
             critic_review_count=review_counts.get(Audience.CRITICS, 0),
             user_review_count=review_counts.get(Audience.USERS, 0),
+            critic_summary=summaries.get(Audience.CRITICS),
+            user_summary=summaries.get(Audience.USERS),
+            similar_games=similar,
+            tags_by_facet=_tags_by_facet(game),
         ),
     )
+
+
+def _tags_by_facet(game: Game) -> dict[str, list[Any]]:
+    grouped: dict[str, list[Any]] = {}
+    for tag in sorted(game.tags, key=lambda item: (item.facet or "", item.name)):
+        grouped.setdefault(tag.facet or "descriptors", []).append(tag)
+    return grouped
 
 
 @router.get("/activity", response_class=HTMLResponse)
@@ -314,7 +360,7 @@ def settings_page(
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context=page_context(request, auth, settings=setting_rows),
+        context=page_context(request, auth, settings=setting_rows, tunables=describe_settings(db)),
     )
 
 

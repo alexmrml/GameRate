@@ -1,5 +1,24 @@
 {% extends "base.html" %}
 {% block title %}{{ game.title }} · {{ app_name }}{% endblock %}
+{% macro summary_block(summary, audience, collected) %}
+  {% if summary %}
+    <p class="verdict">{{ summary.verdict }}</p>
+    <p>{{ summary.summary }}</p>
+    {% if summary.positives %}
+      <h4>What they liked</h4>
+      <ul class="insight-list">{% for item in summary.positives %}<li class="liked">{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if summary.negatives %}
+      <h4>What they disliked</h4>
+      <ul class="insight-list">{% for item in summary.negatives %}<li class="disliked">{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+    <span class="muted">From {{ summary.source_count }} {{ audience }} reviews · {{ summary.model_name }} · {{ summary.generated_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+  {% elif collected %}
+    <p class="empty-copy">{{ collected }} {{ audience }} review{{ '' if collected == 1 else 's' }} collected — not yet enough for a summary.</p>
+  {% else %}
+    <p class="empty-copy">No {{ audience }} reviews collected yet.</p>
+  {% endif %}
+{% endmacro %}
 {% block content %}
   <a class="back-link" href="/games">Back to games</a>
   <div class="page-heading detail-heading">
@@ -9,10 +28,13 @@
         <h1>{{ game.title }}</h1>
         <p class="muted">
           {% if game.release_date %}Released {{ game.release_date }} · {% endif %}
-          {% if game.developer %}{{ game.developer }} · {% endif %}
-          Updated {{ game.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC
+          {% if game.developer %}{{ game.developer }}{% endif %}
+          {% if lead %} · Lead platform {{ lead.platform.name }}{% endif %}
         </p>
-        {% if game.genres %}<div class="inline-list">{% for genre in game.genres %}<span class="chip">{{ genre.name }}</span>{% endfor %}</div>{% endif %}
+        <div class="badge-list">
+          {% for genre in game.genres %}<span class="chip chip-genre">{{ genre.name }}</span>{% endfor %}
+          {% for facet, tags in tags_by_facet.items() %}{% for tag in tags %}<span class="chip" title="{{ facet }}">{{ tag.name }}</span>{% endfor %}{% endfor %}
+        </div>
       </div>
     </div>
     <div class="detail-actions">
@@ -30,10 +52,45 @@
         <thead><tr><th>Platform</th><th>Metascore</th><th>Userscore</th><th>Critic reviews</th><th>User ratings</th></tr></thead>
         <tbody>
           {% for item in game.platforms %}
-            <tr><td>{{ item.platform.name }}</td><td>{{ item.metascore if item.metascore is not none else '—' }}</td><td>{{ item.userscore if item.userscore is not none else '—' }}</td><td>{{ item.critic_review_count or '—' }}</td><td>{{ item.user_rating_count or '—' }}</td></tr>
+            <tr>
+              <td>{{ item.platform.name }}{% if lead and item.platform_id == lead.platform_id %} <span class="chip chip-small">lead</span>{% endif %}</td>
+              <td>{{ item.metascore if item.metascore is not none else 'not rated' }}</td>
+              <td>{{ item.userscore if item.userscore is not none else 'not rated' }}</td>
+              <td>{{ item.critic_review_count if item.critic_review_count is not none else '—' }}</td>
+              <td>{{ item.user_rating_count if item.user_rating_count is not none else '—' }}</td>
+            </tr>
           {% else %}<tr><td colspan="5" class="empty-state">No platform scores yet.</td></tr>{% endfor %}
         </tbody>
       </table>
+    </div>
+  </section>
+
+  <div class="two-column">
+    <section class="section">
+      <h2>What critics say</h2>
+      {{ summary_block(critic_summary, 'critic', critic_review_count) }}
+    </section>
+    <section class="section">
+      <h2>What players say</h2>
+      {{ summary_block(user_summary, 'player', user_review_count) }}
+    </section>
+  </div>
+
+  <section class="section">
+    <h2>Similar games</h2>
+    <div class="similar-grid">
+      {% for match in similar_games %}
+        <a class="similar-card" href="/games/{{ match.game.id }}">
+          {% if match.game.cover_image_url %}<img class="cover" src="{{ match.game.cover_image_url }}" alt="" loading="lazy">{% endif %}
+          <div>
+            <strong>{{ match.game.title }}</strong>
+            <span class="match-score">{{ (match.score * 100) | round | int }}% match</span>
+            <ul class="reason-list">{% for reason in match.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+          </div>
+        </a>
+      {% else %}
+        <p class="empty-copy">No similar games found yet — tags are added when a game is analysed.</p>
+      {% endfor %}
     </div>
   </section>
 
@@ -60,18 +117,12 @@
     </section>
   </div>
 
-  <div class="two-column">
-    <section class="section">
-      <h2>Review summaries</h2>
-      {% for item in game.review_summaries %}
-        <article class="text-block"><h3>{{ item.audience.value | title }}</h3><p>{{ item.summary }}</p><span class="muted">Based on {{ item.source_count }} sources</span></article>
-      {% else %}<p class="empty-copy">No review summaries yet.</p>{% endfor %}
-    </section>
+  {% if game.youtube_analyses %}
     <section class="section">
       <h2>YouTube analysis</h2>
       {% for item in game.youtube_analyses %}
         <article class="text-block"><h3>{{ item.video_title or item.video_id }}</h3><p>{{ item.summary or 'Analysis pending.' }}</p></article>
-      {% else %}<p class="empty-copy">No YouTube analysis yet.</p>{% endfor %}
+      {% endfor %}
     </section>
-  </div>
+  {% endif %}
 {% endblock %}
