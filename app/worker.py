@@ -3,15 +3,19 @@ import logging
 import signal
 import socket
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.collectors.metacritic import MetacriticClient
 from app.config import settings
 from app.db import SessionLocal
 from app.models import ProcessingRun, RunStatus, WorkerHeartbeat
-from app.services.runs import claim_next_run
+from app.services.crawl import release_state
+from app.services.pipeline import build_client, execute_run
+from app.services.runs import claim_next_run, ensure_scheduled_run, recover_stale_runs
 from app.time import utc_now
 
 logging.basicConfig(
@@ -20,6 +24,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("gamerate.worker")
 stopping = False
+
+ClientFactory = Callable[[], MetacriticClient]
 
 
 def request_stop(_signum: int, _frame: object) -> None:
@@ -43,43 +49,48 @@ def heartbeat(db: Session, worker_id: str, started_at: datetime, run_id: object 
     db.commit()
 
 
-def execute_placeholder(db: Session, run: ProcessingRun) -> None:
-    """Complete infrastructure jobs without performing external collection yet."""
-    logger.info("claimed run id=%s trigger=%s", run.id, run.trigger.value)
-    run.message = "Worker accepted job; collectors are not implemented yet"
-    run.progress_total = 0
-    run.progress_current = 0
-    run.updated_at = utc_now()
+def fail_run(db: Session, run_id: object, error: Exception) -> None:
+    db.rollback()
+    failed = db.scalar(select(ProcessingRun).where(ProcessingRun.id == run_id))
+    if failed is None or failed.status in {RunStatus.SUCCEEDED, RunStatus.FAILED}:
+        return
+    now = utc_now()
+    failed.status = RunStatus.FAILED
+    failed.error = str(error)
+    failed.message = f"Run failed: {error}"[:1000]
+    failed.finished_at = now
+    failed.updated_at = now
+    release_state(db, failed.id)
     db.commit()
 
-    run.status = RunStatus.SUCCEEDED
-    run.finished_at = utc_now()
-    run.updated_at = run.finished_at
-    run.message = "No-op processing completed"
-    db.commit()
-    logger.info("completed run id=%s status=%s", run.id, run.status.value)
 
-
-def work_once(worker_id: str, started_at: datetime) -> bool:
+def work_once(
+    worker_id: str,
+    started_at: datetime,
+    *,
+    client_factory: ClientFactory = build_client,
+    schedule: bool = True,
+) -> bool:
+    """Poll once: recover abandoned work, keep the schedule, then run one job."""
     with SessionLocal() as db:
         heartbeat(db, worker_id, started_at)
+        recover_stale_runs(db)
+        if schedule:
+            ensure_scheduled_run(db)
         run = claim_next_run(db, worker_id)
         if run is None:
             return False
         heartbeat(db, worker_id, started_at, run.id)
+        client: MetacriticClient | None = None
         try:
-            execute_placeholder(db, run)
+            client = client_factory()
+            execute_run(db, run, client)
         except Exception as exc:
-            db.rollback()
-            failed = db.scalar(select(ProcessingRun).where(ProcessingRun.id == run.id))
-            if failed:
-                failed.status = RunStatus.FAILED
-                failed.error = str(exc)
-                failed.finished_at = utc_now()
-                failed.updated_at = failed.finished_at
-                db.commit()
             logger.exception("run failed id=%s", run.id)
+            fail_run(db, run.id, exc)
         finally:
+            if client is not None:
+                client.close()
             heartbeat(db, worker_id, started_at)
         return True
 
@@ -87,6 +98,9 @@ def work_once(worker_id: str, started_at: datetime) -> bool:
 def run_loop(worker_id: str, once: bool = False) -> None:
     started_at = utc_now()
     logger.info("worker started id=%s", worker_id)
+    with SessionLocal() as db:
+        for run_id in recover_stale_runs(db, worker_id):
+            logger.warning("recovered interrupted run id=%s", run_id)
     while not stopping:
         handled = work_once(worker_id, started_at)
         if once:
