@@ -29,6 +29,7 @@ BROWSE_PATH = "/browse/game/all/all/all-time/new/"
 CRITIC_AUDIENCE = "critics"
 USER_AUDIENCE = "users"
 CRITIC_REVIEWS_PER_PAGE = 10
+MAX_RELATED_SLUGS = 24
 
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
@@ -81,6 +82,9 @@ class GameSnapshot:
     release_date: date | None = None
     cover_image_url: str | None = None
     video_url: str | None = None
+    esrb_rating: str | None = None
+    # Metacritic's own "more like this" carousel: its genre peers, ranked by score.
+    related_slugs: list[str] = field(default_factory=list)
     genres: list[str] = field(default_factory=list)
     platforms: list[PlatformScore] = field(default_factory=list)
     reviews: list[ReviewRecord] = field(default_factory=list)
@@ -216,7 +220,8 @@ def parse_browse_page(html: str) -> list[str]:
 def parse_game_page(html: str) -> GameSnapshot:
     """Core metadata and per-platform Metascores for one game."""
     page = find_data_entry(payload_data(html), "loadPage:games:")
-    product = components(page).get("product")
+    page_components = components(page)
+    product = page_components.get("product")
     item = product.get("item") if isinstance(product, dict) else None
     if not isinstance(item, dict):
         raise MetacriticError("Game page carried no product item")
@@ -251,6 +256,10 @@ def parse_game_page(html: str) -> GameSnapshot:
         if name and name not in genres:
             genres.append(name)
 
+    related = [
+        other for other in _slugs(_rows(page_components.get("related-carousel"))) if other != slug
+    ][:MAX_RELATED_SLUGS]
+
     return GameSnapshot(
         slug=slug,
         title=title,
@@ -261,6 +270,8 @@ def parse_game_page(html: str) -> GameSnapshot:
         release_date=_as_date(item.get("releaseDate")),
         cover_image_url=_image_url(item, "cardImage") or _image_url(item, "mainImage"),
         video_url=_video_url(item),
+        esrb_rating=_clean(item.get("rating")),
+        related_slugs=related,
         genres=genres,
         platforms=platforms,
     )

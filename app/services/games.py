@@ -153,6 +153,8 @@ def apply_game_snapshot(db: Session, snapshot: GameSnapshot) -> Game:
         metacritic_url=snapshot.metacritic_url,
         cover_image_url=snapshot.cover_image_url,
         video_url=snapshot.video_url,
+        esrb_rating=snapshot.esrb_rating,
+        related_slugs=snapshot.related_slugs or None,
     )
 
     platforms = {score.slug: _apply_platform(db, game, score) for score in snapshot.platforms}

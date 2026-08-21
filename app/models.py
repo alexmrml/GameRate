@@ -116,6 +116,12 @@ class Game(Base):
     metacritic_url: Mapped[str | None] = mapped_column(String(1000))
     cover_image_url: Mapped[str | None] = mapped_column(String(1000))
     video_url: Mapped[str | None] = mapped_column(String(1000))
+    esrb_rating: Mapped[str | None] = mapped_column(String(16))
+    # Metacritic's own genre-peer carousel, kept as slugs for similarity matching.
+    related_slugs: Mapped[list[str] | None] = mapped_column(JSON)
+    ai_tags_digest: Mapped[str | None] = mapped_column(String(64))
+    ai_tags_model: Mapped[str | None] = mapped_column(String(120))
+    ai_tags_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -183,11 +189,14 @@ class Genre(Base):
 
 
 class Tag(Base):
+    """A similarity facet value. `facet` groups tags so matching can weight them apart."""
+
     __tablename__ = "tags"
 
     id: Mapped[uuid.UUID] = uuid_pk()
     slug: Mapped[str] = mapped_column(String(100), unique=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
+    facet: Mapped[str | None] = mapped_column(String(40), index=True)
     games: Mapped[list[Game]] = relationship(secondary=game_tags, back_populates="tags")
 
 
@@ -242,6 +251,11 @@ class ReviewSummary(Base):
     )
     audience: Mapped[Audience] = mapped_column(Enum(Audience, name="review_audience"))
     summary: Mapped[str] = mapped_column(Text)
+    verdict: Mapped[str | None] = mapped_column(String(200))
+    positives: Mapped[list[str] | None] = mapped_column(JSON)
+    negatives: Mapped[list[str] | None] = mapped_column(JSON)
+    # "<prompt version>:<sha256 of the review keys>", so a prompt change is visible.
+    input_digest: Mapped[str | None] = mapped_column(String(80))
     source_count: Mapped[int] = mapped_column(Integer, default=0)
     model_name: Mapped[str | None] = mapped_column(String(255))
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
