@@ -118,6 +118,30 @@ Web and worker share configuration and models but no process memory.
   context all use it, so the number a user sees is the number everything else reasons about.
   Unrated games show "not rated" and sort last; never substitute 0.
 
+## YouTube analysis
+
+- `youtube_analyses` has one durable state row per game. It stores success as well as
+  `no_candidate`, provider/quota failures, unavailable sources and `no_useful_commentary`, plus
+  the complete candidate cache and attempted video IDs. Do not replace this with in-memory retry
+  state or search again while `next_retry_at` is in the future.
+- Discovery makes exactly one popularity-ordered `search.list` call and one batched `videos.list`
+  call per search. It does not use `videoDuration`; Shorts and irrelevant formats are rejected
+  after metadata hydration, then the suitable candidate with the highest `viewCount` wins. A
+  failed/silent source advances through cached candidates before another search is allowed.
+- Gemini receives a public YouTube URL with `VideoMetadata.start_offset/end_offset`; captions API,
+  video downloads and audio downloads are intentionally absent. The configured tail fragment is
+  15 minutes by default, or the whole video when shorter.
+- Video opinion output is speech-grounded. The overall conclusion and each liked/disliked point
+  carry verbatim speech evidence; only evidence found in the stored transcript is accepted.
+  Tutorial steps, useful items and momentary frustration are not an overall game opinion. A
+  source without a supported overall view is `no_useful_commentary`, not a fabricated summary.
+- Video analysis has a separate model/session/status from review/tag enrichment. The default is
+  `gemini-3.5-flash`, one video per run because live 15-minute calls took minutes. Served Gemma 4
+  31B has no audio track and cannot replace Gemini for creator-speech analysis.
+- `GOOGLE_CLOUD_API_KEY` and `GEMINI_API_KEY` are environment-only. YouTube feature/model/fragment/
+  batch tunables use `app/services/app_settings.py`; no YouTube failure may fail the crawl or stop
+  ordinary Gemini enrichment.
+
 ## Testing
 
 Tests never touch the live site or Gemini. `tests/fixtures/metacritic/` holds trimmed captures of
@@ -130,8 +154,7 @@ hold a real key — cannot change test outcomes or trigger a live call.
 ## Current state and next work
 
 Auth, catalogue and detail pages, activity queue with SSE progress, settings, health, worker
-heartbeat, Compose, CI, the Metacritic pipeline (discovery, per-platform scores, review
-collection, hourly schedule, restart recovery) and Gemini enrichment (per-audience summaries,
-similarity tags, weighted similar games) are in place. Next work is YouTube analysis and the
-final product design. `YouTubeAnalysis` is still empty. Add each integration behind service-layer
-boundaries and record raw provider identifiers for idempotency.
+heartbeat, Compose, CI, the Metacritic pipeline, Gemini review/tag enrichment, weighted similar
+games, and YouTube let's-play discovery/speech analysis are in place. Next work is the final
+product design. Keep new integrations behind service-layer boundaries and store raw provider
+identifiers/status for idempotency.

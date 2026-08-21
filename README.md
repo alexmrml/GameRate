@@ -83,3 +83,36 @@ absolute count and in relative growth.
 
 The knobs in the lower half of that table can also be changed at runtime on `/settings`, where
 each shows its environment default, any override, and the value in force.
+
+## YouTube let's-play analysis
+
+The same processing run also fills a separate let's-play perspective for games that do not yet
+have a useful result. Discovery makes one popularity-ordered YouTube Data API search per game,
+hydrates all returned metadata in one `videos.list`, rejects trailers, reviews, guides, demos,
+soundtracks, cutscenes, Shorts, no-commentary videos and similar false positives, then chooses
+the remaining video with the most views. Empty searches and provider errors are persisted, so an
+hourly run does not repeat them immediately; candidates are cached so a silent or unavailable
+video can advance to the next result without another search.
+
+Gemini receives the public YouTube URL directly — the application never calls the captions API
+and never downloads video or audio. Only the configured number of minutes at the end of the video
+is sent (15 by default, or the whole available video when shorter). The structured response keeps
+a speech transcript, overall impression, liked/disliked points and a verbatim speech quote for
+each finding. A result is shown as useful only when its overall quote is found in the transcript;
+otherwise the source gets a retryable `no_useful_commentary` status.
+
+YouTube has its own model and failure state, so quota, search, unavailable-video and Gemini errors
+cannot fail Metacritic collection or ordinary review/tag enrichment. Video calls can take several
+minutes, which is why the default is one game per run. The `/settings` page can change the feature
+toggle, model, fragment length and per-run cap without exposing either provider key.
+
+| Variable | Meaning |
+| --- | --- |
+| `GOOGLE_CLOUD_API_KEY` | YouTube Data API key; environment-only |
+| `YOUTUBE_ANALYSIS_ENABLED` | Enable/disable the YouTube phase |
+| `YOUTUBE_ANALYSIS_MODEL` | Multimodal Gemini model (`gemini-3.5-flash` by default) |
+| `YOUTUBE_ANALYSIS_FRAGMENT_MINUTES` | Minutes analyzed from the end of the video |
+| `YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN` | Backlog cap per processing run (default 1) |
+| `YOUTUBE_SEARCH_MAX_RESULTS` | Candidates fetched by the single search request |
+| `YOUTUBE_RETRY_INTERVAL_HOURS` | Delay after provider/source failures |
+| `YOUTUBE_NO_RESULT_REFRESH_DAYS` | When an empty search may be repeated |
