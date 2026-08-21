@@ -36,6 +36,25 @@ class Settings(BaseSettings):
     schedule_interval_minutes: int = Field(default=60, ge=1)
     run_stale_seconds: int = Field(default=900, ge=60)
 
+    # Gemini enrichment. The key is environment-owned and never editable from /settings.
+    gemini_api_key: str = ""
+    # Free keys allow ~5 requests/minute on gemini-*-flash but far more on Gemma,
+    # which the hourly crawler needs; switch models from /settings on a paid key.
+    gemini_model: str = "gemma-4-31b-it"
+    gemini_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    gemini_max_retries: int = Field(default=3, ge=1, le=10)
+    gemini_retry_delay_seconds: float = Field(default=2.0, ge=0.0)
+    # Free Gemini keys are limited per minute; pacing keeps a batch from tripping the quota.
+    gemini_requests_per_minute: int = Field(default=25, ge=1, le=600)
+    ai_enabled: bool = True
+    ai_min_reviews: int = Field(default=3, ge=1)
+    ai_max_reviews_per_audience: int = Field(default=40, ge=1)
+    ai_max_games_per_run: int = Field(default=20, ge=0)
+    ai_refresh_min_new_reviews: int = Field(default=5, ge=1)
+    ai_refresh_min_growth: float = Field(default=0.25, ge=0.0)
+    ai_min_refresh_interval_hours: int = Field(default=12, ge=0)
+    similar_games_limit: int = Field(default=6, ge=1, le=24)
+
     @field_validator("app_timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:
