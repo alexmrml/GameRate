@@ -1,8 +1,8 @@
 """Runtime settings with an environment default and a database override.
 
 Deployment values stay environment-owned, but the knobs that decide how often the worker
-talks to Gemini can be retuned from `/settings` without restarting a container. Secrets are
-deliberately absent from this map: the Gemini key is only ever read from the environment.
+talks to Gemini and YouTube can be retuned from `/settings` without restarting a container.
+Secrets are deliberately absent from this map: provider keys are only read from environment.
 """
 
 import logging
@@ -63,6 +63,30 @@ TUNABLES: tuple[TunableSetting, ...] = (
         int,
         "ai_min_refresh_interval_hours",
         "Quiet period after a summary before it may be regenerated",
+    ),
+    TunableSetting(
+        "youtube.enabled",
+        bool,
+        "youtube_analysis_enabled",
+        "Find and analyze a YouTube let's-play for games without a useful result",
+    ),
+    TunableSetting(
+        "youtube.model",
+        str,
+        "youtube_analysis_model",
+        "Multimodal Gemini model used for YouTube speech analysis",
+    ),
+    TunableSetting(
+        "youtube.fragment_minutes",
+        int,
+        "youtube_analysis_fragment_minutes",
+        "Minutes from the end of the selected video sent to Gemini",
+    ),
+    TunableSetting(
+        "youtube.max_games_per_run",
+        int,
+        "youtube_analysis_max_games_per_run",
+        "Maximum games searched or analyzed per processing run",
     ),
 )
 

@@ -138,8 +138,8 @@ class Game(Base):
     review_summaries: Mapped[list["ReviewSummary"]] = relationship(
         back_populates="game", cascade="all, delete-orphan"
     )
-    youtube_analyses: Mapped[list["YouTubeAnalysis"]] = relationship(
-        back_populates="game", cascade="all, delete-orphan"
+    youtube_analysis: Mapped["YouTubeAnalysis | None"] = relationship(
+        back_populates="game", cascade="all, delete-orphan", uselist=False
     )
 
 
@@ -267,22 +267,37 @@ class ReviewSummary(Base):
 
 class YouTubeAnalysis(Base):
     __tablename__ = "youtube_analyses"
-    __table_args__ = (UniqueConstraint("game_id", "video_id", name="uq_game_youtube_video"),)
+    __table_args__ = (UniqueConstraint("game_id", name="uq_youtube_analysis_game"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     game_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"))
-    video_id: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    status_reason: Mapped[str | None] = mapped_column(String(1000))
+    search_query: Mapped[str | None] = mapped_column(String(1000))
+    search_data: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    search_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    video_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    video_url: Mapped[str | None] = mapped_column(String(1000))
     video_title: Mapped[str | None] = mapped_column(String(500))
+    channel_id: Mapped[str | None] = mapped_column(String(80))
     channel_title: Mapped[str | None] = mapped_column(String(255))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    view_count: Mapped[int | None] = mapped_column(Integer)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    fragment_start_seconds: Mapped[int | None] = mapped_column(Integer)
+    fragment_end_seconds: Mapped[int | None] = mapped_column(Integer)
+    speech_transcript: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
+    liked: Mapped[list[str] | None] = mapped_column(JSON)
+    disliked: Mapped[list[str] | None] = mapped_column(JSON)
     analysis_data: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     model_name: Mapped[str | None] = mapped_column(String(255))
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
-    game: Mapped[Game] = relationship(back_populates="youtube_analyses")
+    game: Mapped[Game] = relationship(back_populates="youtube_analysis")
 
 
 class ProcessingRun(Base):

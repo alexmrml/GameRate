@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     ai_min_refresh_interval_hours: int = Field(default=12, ge=0)
     similar_games_limit: int = Field(default=6, ge=1, le=24)
 
+    # YouTube discovery has its own key and failure domain. Both API keys stay
+    # environment-owned; only the behavioural knobs below may be overridden in DB.
+    google_cloud_api_key: str = ""
+    youtube_analysis_enabled: bool = True
+    youtube_analysis_model: str = "gemini-3.5-flash"
+    youtube_analysis_fragment_minutes: int = Field(default=15, ge=1, le=60)
+    youtube_analysis_max_games_per_run: int = Field(default=1, ge=0, le=50)
+    youtube_search_max_results: int = Field(default=25, ge=5, le=50)
+    youtube_retry_interval_hours: int = Field(default=24, ge=1)
+    youtube_no_result_refresh_days: int = Field(default=30, ge=1)
+
     @field_validator("app_timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:

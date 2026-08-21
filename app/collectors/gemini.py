@@ -35,6 +35,7 @@ USERS = "users"
 # Bump when the review prompt or schema changes in a way that should invalidate stored
 # summaries: the enrichment service treats a different version as work to redo.
 PROMPT_VERSION = "2"
+YOUTUBE_PROMPT_VERSION = "4"
 
 _FATAL_STATUS = {400, 401, 403, 404}
 _TEMPORARY_STATUS = {408, 409, 429, 500, 502, 503, 504}
@@ -54,6 +55,10 @@ class GeminiTemporaryError(GeminiError):
 
 class GeminiInvalidResponse(GeminiError):
     """Gemini answered, but not in the shape the schema requires."""
+
+
+class GeminiVideoUnavailable(GeminiError):
+    """The public YouTube source could not be read by Gemini."""
 
 
 # --- response schemas -------------------------------------------------------------
@@ -90,6 +95,22 @@ class TagSet(BaseModel):
     structure: list[str] = Field(default_factory=list, max_length=4)
     mood: list[str] = Field(default_factory=list, max_length=3)
     descriptors: list[str] = Field(default_factory=list, max_length=5)
+
+
+class VideoOpinionPoint(BaseModel):
+    statement: str
+    speech_evidence: str
+
+
+class VideoInsight(BaseModel):
+    """Speech-grounded opinion from one selected YouTube fragment."""
+
+    has_useful_commentary: bool
+    speech_transcript: str
+    overall_opinion_evidence: str
+    overall_impression: str
+    liked: list[VideoOpinionPoint] = Field(default_factory=list, max_length=5)
+    disliked: list[VideoOpinionPoint] = Field(default_factory=list, max_length=5)
 
 
 # Controlled vocabulary. A fixed list keeps tags comparable between games, which is what
@@ -262,6 +283,20 @@ class TagResult:
         return [(facet, tag) for facet, tags in self.facets.items() for tag in tags]
 
 
+@dataclass(slots=True)
+class YouTubeVideoResult:
+    has_useful_commentary: bool
+    speech_transcript: str
+    overall_opinion_evidence: str
+    overall_impression: str
+    liked: list[str]
+    disliked: list[str]
+    liked_evidence: list[str]
+    disliked_evidence: list[str]
+    model: str
+    prompt_version: str = YOUTUBE_PROMPT_VERSION
+
+
 # --- prompts ----------------------------------------------------------------------
 
 REVIEW_SYSTEM_PROMPT = """\
@@ -306,6 +341,54 @@ Ground rules:
   the facets do not cover (for example "time-manipulation", "roguelite-deckbuilder",
   "asymmetric-multiplayer"). Leave it empty if the facets already say everything.
 """
+
+YOUTUBE_SYSTEM_PROMPT = """\
+You analyse the spoken commentary in a video game let's-play fragment.
+
+Ground rules:
+- The creator's speech in the supplied fragment is the only evidence for opinions. Do not
+  infer a judgment from gameplay footage, facial expressions, music, or events on screen.
+- `speech_transcript` is a compact, faithful textual representation of what the creator says
+  in the fragment. Preserve the source language and omit game dialogue, lyrics, and speech
+  from other embedded media. Never replace speech with a description of screen events.
+- `overall_impression`, `liked`, and `disliked` are written in plain English and must each be
+  supported by something the creator actually says. Leave a list empty when speech does not
+  support it; do not use outside knowledge about the game.
+- Treat only an evaluation of the game's quality or the creator's enjoyment as an opinion.
+  Instructions, route narration, build advice, item recommendations, mechanic explanations,
+  and statements about what is useful are not evidence that the creator likes or dislikes the
+  game. Never summarize a walkthrough's steps as the creator's overall impression.
+- `overall_impression` is an evaluation, not a topic summary. It must say how the creator
+  judges or feels about the game and be grounded in explicit evaluative speech (for example,
+  "I love this combat" or "the game is disappointing"). "The creator explains mechanics",
+  "provides a walkthrough", or "focuses on an ideal start" are forbidden here.
+- `overall_opinion_evidence` is one short, verbatim quote from the creator's transcribed
+  speech that explicitly supports their broad judgment of the game or experience. It must
+  occur word-for-word in `speech_transcript`. Leave it empty when there is no such quote.
+- Useful, powerful, necessary, recommended, and worth picking up describe strategy, not
+  enjoyment. Do not turn those words into liked points. A liked/disliked point requires the
+  creator to praise, enjoy, criticize, dislike, or express frustration with a game quality.
+- Every liked/disliked point carries its own short verbatim `speech_evidence`. Do not return
+  a point if its evidence is absent from the transcript.
+- Separate momentary frustration at one failed jump, death, puzzle, opponent, or technical
+  mishap from the creator's general view of the game. Treat it as an overall criticism only
+  when the creator explicitly generalizes it to the game, system, or repeated experience.
+- Set `has_useful_commentary` to false when there is no creator speech, speech is mostly game
+  dialogue/instructions, or the creator never evaluates the game's quality or their experience.
+  A single incidental preference during an otherwise instructional fragment is not an overall
+  view. When false, `overall_impression`, `liked`, and `disliked` must all be empty, while
+  `overall_opinion_evidence` is empty and `speech_transcript` still records creator speech.
+- Each liked/disliked entry is one concrete sentence of at most 20 words. Return at most five,
+  strongest first. `overall_impression` is at most 50 words. No markdown.
+"""
+
+
+def build_youtube_prompt(game_title: str, start_seconds: int, end_seconds: int) -> str:
+    return (
+        f"Game: {game_title}\n"
+        f"Use only the supplied fragment ({start_seconds}s to {end_seconds}s in the source).\n"
+        "Transcribe the creator's spoken commentary and derive only speech-supported opinions."
+    )
 
 
 def _excerpt_block(label: str, excerpts: list[ReviewExcerpt]) -> str:
@@ -437,6 +520,16 @@ class GeminiClient:
 
     def _generate(self, prompt: str, system_prompt: str, schema: type[BaseModel]) -> BaseModel:
         contents = prompt if self.supports_system_instruction else f"{system_prompt}\n\n{prompt}"
+        return self._generate_contents(contents, system_prompt, schema)
+
+    def _generate_contents(
+        self,
+        contents: Any,
+        system_prompt: str,
+        schema: type[BaseModel],
+        *,
+        video_input: bool = False,
+    ) -> BaseModel:
         attempts = max(settings.gemini_max_retries, 1)
         last_error: Exception | None = None
         retry_after: float | None = None
@@ -451,6 +544,18 @@ class GeminiClient:
                 )
             except genai_errors.APIError as exc:
                 status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+                message = str(exc).casefold()
+                if (
+                    video_input
+                    and status in {400, 404}
+                    and any(
+                        marker in message
+                        for marker in ("youtube", "video", "file uri", "file_uri", "media")
+                    )
+                ):
+                    raise GeminiVideoUnavailable(
+                        f"Gemini could not read the YouTube video ({status}): {exc}"
+                    ) from exc
                 if status in _FATAL_STATUS:
                     raise GeminiUnavailable(f"Gemini rejected the call ({status}): {exc}") from exc
                 if status in _TEMPORARY_STATUS or status is None:
@@ -530,6 +635,54 @@ class GeminiClient:
         if descriptors:
             facets["descriptors"] = list(dict.fromkeys(descriptors))
         return TagResult(facets=facets, model=self.model)
+
+    def analyze_youtube_video(
+        self,
+        *,
+        game_title: str,
+        video_url: str,
+        start_seconds: int,
+        end_seconds: int,
+    ) -> YouTubeVideoResult:
+        """Analyse a clipped public YouTube URL without downloading its media."""
+        if self.model.lower().startswith("gemma"):
+            raise GeminiUnavailable(
+                f"{self.model} is not suitable for YouTube speech analysis: this served "
+                "Gemma variant does not receive the video's audio track"
+            )
+        if end_seconds <= start_seconds:
+            raise ValueError("YouTube fragment end must be after its start")
+        prompt = build_youtube_prompt(game_title, start_seconds, end_seconds)
+        contents = types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    file_data=types.FileData(file_uri=video_url),
+                    video_metadata=types.VideoMetadata(
+                        start_offset=f"{start_seconds}s", end_offset=f"{end_seconds}s"
+                    ),
+                ),
+                types.Part(text=prompt),
+            ],
+        )
+        result = self._generate_contents(
+            contents, YOUTUBE_SYSTEM_PROMPT, VideoInsight, video_input=True
+        )
+        return YouTubeVideoResult(
+            has_useful_commentary=result.has_useful_commentary,
+            speech_transcript=result.speech_transcript.strip(),
+            overall_opinion_evidence=result.overall_opinion_evidence.strip(),
+            overall_impression=result.overall_impression.strip(),
+            liked=[item.statement.strip() for item in result.liked if item.statement.strip()],
+            disliked=[item.statement.strip() for item in result.disliked if item.statement.strip()],
+            liked_evidence=[
+                item.speech_evidence.strip() for item in result.liked if item.statement.strip()
+            ],
+            disliked_evidence=[
+                item.speech_evidence.strip() for item in result.disliked if item.statement.strip()
+            ],
+            model=self.model,
+        )
 
 
 def _first_json_object(text: str) -> Any:
