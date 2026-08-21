@@ -201,6 +201,59 @@ def test_youtube_video_uses_clipping_and_a_structured_speech_schema() -> None:
     }
 
 
+def test_transcript_analysis_is_a_plain_text_call_gemma_can_serve() -> None:
+    """The main path must work on the cheap high-quota model, not just the video one."""
+    fake = sdk(
+        reply(
+            {
+                "has_useful_commentary": True,
+                "overall_opinion_evidence": "I like the combat",
+                "overall_impression": "Автору нравится боевая система.",
+                "liked": [
+                    {
+                        "statement": "Бои ощущаются отзывчивыми",
+                        "speech_evidence": "I like the combat",
+                    }
+                ],
+                "disliked": [],
+            }
+        )
+    )
+    gemma = GeminiClient(client=fake, model="gemma-4-31b-it", sleep=lambda _s: None)
+
+    result = gemma.analyze_letsplay_transcript(
+        game_title="Test Game",
+        transcript="I like the combat, but loading takes too long.",
+        language="en",
+        start_seconds=1200,
+        end_seconds=2100,
+    )
+
+    assert result.source == "transcript"
+    assert result.model == "gemma-4-31b-it"
+    # The transcript is the caller's, never the model's retelling of it.
+    assert result.speech_transcript == "I like the combat, but loading takes too long."
+    assert result.liked == ["Бои ощущаются отзывчивыми"]
+    call = fake.models.calls[0]
+    assert "speech_transcript" not in call.config.response_schema.model_fields
+    assert "I like the combat, but loading takes too long." in call.contents
+    assert "Russian" in call.contents  # Gemma has no system role, so the rules are inlined
+
+
+def test_an_empty_transcript_is_never_sent_to_the_model() -> None:
+    fake = sdk(reply({}))
+
+    with pytest.raises(ValueError, match="non-empty transcript"):
+        client_for(fake).analyze_letsplay_transcript(
+            game_title="Test Game",
+            transcript="   ",
+            language="en",
+            start_seconds=0,
+            end_seconds=900,
+        )
+    assert fake.models.calls == []
+
+
 def test_gemma_is_not_used_for_speech_analysis_without_an_audio_track() -> None:
     fake = sdk(reply({}))
     gemma = GeminiClient(client=fake, model="gemma-4-31b-it", sleep=lambda _s: None)
@@ -213,6 +266,16 @@ def test_gemma_is_not_used_for_speech_analysis_without_an_audio_track() -> None:
             end_seconds=900,
         )
     assert fake.models.calls == []
+
+
+def test_findings_are_requested_in_russian_while_sources_stay_untranslated() -> None:
+    fake = sdk(reply(FULL_ANALYSIS))
+    client_for(fake).analyze_reviews(GAME, CRITICS, USERS)
+
+    instruction = fake.models.calls[0].config.system_instruction
+    assert "Write every generated sentence in Russian" in instruction
+    assert "Do not translate or restate the" in instruction
+    assert "The combat is stiff" in fake.models.calls[0].contents  # excerpt kept verbatim
 
 
 def test_review_prompt_labels_audiences_and_omits_the_missing_one() -> None:

@@ -34,8 +34,20 @@ USERS = "users"
 
 # Bump when the review prompt or schema changes in a way that should invalidate stored
 # summaries: the enrichment service treats a different version as work to redo.
-PROMPT_VERSION = "2"
-YOUTUBE_PROMPT_VERSION = "4"
+PROMPT_VERSION = "3"
+YOUTUBE_PROMPT_VERSION = "5"
+
+TRANSCRIPT_SOURCE = "transcript"
+VIDEO_SOURCE = "video"
+
+# Every generated sentence is written in Russian whatever language the source is in. The
+# sources themselves are never translated: reviews and speech evidence stay verbatim.
+RUSSIAN_OUTPUT_RULE = """\
+- Write every generated sentence in Russian, whatever language the source material is in.
+  This applies to all summaries, verdicts and list entries. Do not translate or restate the
+  source text itself, and never mix languages inside one sentence. Keep proper names — the
+  game, studios, characters, publications — in their original spelling.
+"""
 
 _FATAL_STATUS = {400, 401, 403, 404}
 _TEMPORARY_STATUS = {408, 409, 429, 500, 502, 503, 504}
@@ -107,6 +119,21 @@ class VideoInsight(BaseModel):
 
     has_useful_commentary: bool
     speech_transcript: str
+    overall_opinion_evidence: str
+    overall_impression: str
+    liked: list[VideoOpinionPoint] = Field(default_factory=list, max_length=5)
+    disliked: list[VideoOpinionPoint] = Field(default_factory=list, max_length=5)
+
+
+class TranscriptInsight(BaseModel):
+    """The same findings from a transcript the caller already holds.
+
+    No `speech_transcript` field: the transcript is an input here, so asking the model to
+    echo it would only offer it a chance to paraphrase the evidence quotes are checked
+    against.
+    """
+
+    has_useful_commentary: bool
     overall_opinion_evidence: str
     overall_impression: str
     liked: list[VideoOpinionPoint] = Field(default_factory=list, max_length=5)
@@ -294,6 +321,7 @@ class YouTubeVideoResult:
     liked_evidence: list[str]
     disliked_evidence: list[str]
     model: str
+    source: str = VIDEO_SOURCE
     prompt_version: str = YOUTUBE_PROMPT_VERSION
 
 
@@ -309,23 +337,24 @@ Ground rules:
   section's own excerpts make it. Never copy a point from one section to the other.
 - Every entry names a concrete part of the game — a system, the story, performance, price,
   bugs, length, controls, art — and says what about it. Reject wording that would fit any
-  game ("great gameplay", "a masterpiece", "fun and enjoyable").
-- Write each entry as a statement with a verb, never as a bare label. "Combat and gunplay"
-  and "Performance issues" are rejected; "Gunplay is punchy and weighty" and "Frame rate
-  drops badly in the open city" are what is wanted.
+  game ("отличный геймплей", "шедевр", "весело и увлекательно").
+- Write each entry as a statement with a verb, never as a bare label. "Бои и стрельба" and
+  "Проблемы с производительностью" are rejected; "Стрельба ощущается тяжёлой и точной" and
+  "Частота кадров сильно проседает в открытом городе" are what is wanted.
 - Merge what several reviewers say about the same thing into one entry instead of repeating
   it, and put the most frequently raised points first. At most five entries per list; three
   strong entries beat five weak ones.
-- When opinion on a point is split, say so in the entry ("praised by most, though a few
-  call it repetitive") rather than listing it as both liked and disliked.
+- When opinion on a point is split, say so in the entry ("большинство хвалит, но часть
+  называет однообразным") rather than listing it as both liked and disliked.
 - If a list would have nothing an excerpt actually supports, return it empty. Do not invent
   balance, and do not soften or exaggerate what reviewers wrote.
-- Entries are single sentences of at most 20 words, written in plain English, no markdown.
+- Entries are single plain sentences of at most 20 words, no markdown.
 - `verdict` is at most six words describing that audience's overall reception, e.g.
-  "positive, with reservations about combat".
+  "в целом положительно, с претензиями к боёвке".
 - `summary` is one or two sentences (at most 45 words) covering that audience's overall
   stance and the main disagreement, if any.
 """
+REVIEW_SYSTEM_PROMPT += RUSSIAN_OUTPUT_RULE
 
 TAG_SYSTEM_PROMPT = """\
 You label video games with tags used to find similar games.
@@ -351,17 +380,17 @@ Ground rules:
 - `speech_transcript` is a compact, faithful textual representation of what the creator says
   in the fragment. Preserve the source language and omit game dialogue, lyrics, and speech
   from other embedded media. Never replace speech with a description of screen events.
-- `overall_impression`, `liked`, and `disliked` are written in plain English and must each be
-  supported by something the creator actually says. Leave a list empty when speech does not
-  support it; do not use outside knowledge about the game.
+- `overall_impression`, `liked`, and `disliked` must each be supported by something the
+  creator actually says. Leave a list empty when speech does not support it; do not use
+  outside knowledge about the game.
 - Treat only an evaluation of the game's quality or the creator's enjoyment as an opinion.
   Instructions, route narration, build advice, item recommendations, mechanic explanations,
   and statements about what is useful are not evidence that the creator likes or dislikes the
   game. Never summarize a walkthrough's steps as the creator's overall impression.
 - `overall_impression` is an evaluation, not a topic summary. It must say how the creator
   judges or feels about the game and be grounded in explicit evaluative speech (for example,
-  "I love this combat" or "the game is disappointing"). "The creator explains mechanics",
-  "provides a walkthrough", or "focuses on an ideal start" are forbidden here.
+  "I love this combat" or "the game is disappointing"). "Автор объясняет механики",
+  "проходит игру" or "показывает идеальный старт" are forbidden here.
 - `overall_opinion_evidence` is one short, verbatim quote from the creator's transcribed
   speech that explicitly supports their broad judgment of the game or experience. It must
   occur word-for-word in `speech_transcript`. Leave it empty when there is no such quote.
@@ -382,12 +411,78 @@ Ground rules:
   strongest first. `overall_impression` is at most 50 words. No markdown.
 """
 
+# The quote fields are the one exception to the Russian rule: they are evidence, and
+# evidence only holds up if it is repeated exactly as the creator said it.
+_SPEECH_LANGUAGE_RULE = """\
+- `speech_evidence` and `overall_opinion_evidence` are quotes: copy them verbatim in the
+  creator's own language, never translated, corrected or shortened mid-word. Every other
+  field is written in Russian.
+"""
+
+YOUTUBE_SYSTEM_PROMPT += RUSSIAN_OUTPUT_RULE + _SPEECH_LANGUAGE_RULE
+
+YOUTUBE_TRANSCRIPT_SYSTEM_PROMPT = (
+    """\
+You analyse a transcript of the spoken commentary in a video game let's-play.
+
+Ground rules:
+- The supplied transcript is the complete and only evidence. It was produced from the
+  video's own subtitles, so it may contain recognition errors, missing punctuation and
+  fragments of on-screen dialogue. Read through those, but never invent what is not there.
+- Do not use outside knowledge about the game, and do not infer opinions from what the
+  creator must have been doing on screen. Only what is said counts.
+- Treat only an evaluation of the game's quality or the creator's enjoyment as an opinion.
+  Instructions, route narration, build advice, item recommendations, mechanic explanations,
+  and statements about what is useful are not evidence that the creator likes or dislikes
+  the game. Never summarize a walkthrough's steps as the creator's overall impression.
+- `overall_impression` is an evaluation, not a topic summary. It must say how the creator
+  judges or feels about the game and rest on explicit evaluative speech. "Автор объясняет
+  механики", "проходит игру" or "показывает идеальный старт" are forbidden here.
+- `overall_opinion_evidence` is one short quote, copied verbatim from the transcript, that
+  explicitly supports that broad judgment. It must occur word-for-word in the transcript.
+  Leave it empty when the transcript holds no such quote.
+- Useful, powerful, necessary, recommended, and worth picking up describe strategy, not
+  enjoyment. Do not turn those words into liked points. A liked/disliked point requires the
+  creator to praise, enjoy, criticize, dislike, or express frustration with a game quality.
+- Every liked/disliked point carries its own short verbatim quote in `speech_evidence`.
+  Do not return a point whose quote is absent from the transcript.
+- Separate momentary frustration at one failed jump, death, puzzle, opponent, or technical
+  mishap from the creator's general view of the game. Treat it as an overall criticism only
+  when the creator explicitly generalizes it to the game, system, or repeated experience.
+- Set `has_useful_commentary` to false when the transcript holds no creator speech, is
+  mostly game dialogue or instructions, or never evaluates the game's quality or the
+  creator's experience. A single incidental preference in an otherwise instructional
+  fragment is not an overall view. When false, `overall_impression`, `liked`, `disliked`
+  and `overall_opinion_evidence` must all be empty.
+- Each liked/disliked entry is one concrete sentence of at most 20 words. Return at most
+  five, strongest first. `overall_impression` is at most 50 words. No markdown.
+"""
+    + RUSSIAN_OUTPUT_RULE
+    + _SPEECH_LANGUAGE_RULE
+)
+
 
 def build_youtube_prompt(game_title: str, start_seconds: int, end_seconds: int) -> str:
     return (
         f"Game: {game_title}\n"
         f"Use only the supplied fragment ({start_seconds}s to {end_seconds}s in the source).\n"
         "Transcribe the creator's spoken commentary and derive only speech-supported opinions."
+    )
+
+
+def build_transcript_prompt(
+    game_title: str,
+    transcript: str,
+    *,
+    language: str,
+    start_seconds: int,
+    end_seconds: int,
+) -> str:
+    return (
+        f"Game: {game_title}\n"
+        f"Transcript language: {language}\n"
+        f"Fragment: {start_seconds}s to {end_seconds}s of the let's-play.\n\n"
+        f"TRANSCRIPT:\n{transcript}"
     )
 
 
@@ -668,21 +763,62 @@ class GeminiClient:
         result = self._generate_contents(
             contents, YOUTUBE_SYSTEM_PROMPT, VideoInsight, video_input=True
         )
-        return YouTubeVideoResult(
-            has_useful_commentary=result.has_useful_commentary,
-            speech_transcript=result.speech_transcript.strip(),
-            overall_opinion_evidence=result.overall_opinion_evidence.strip(),
-            overall_impression=result.overall_impression.strip(),
-            liked=[item.statement.strip() for item in result.liked if item.statement.strip()],
-            disliked=[item.statement.strip() for item in result.disliked if item.statement.strip()],
-            liked_evidence=[
-                item.speech_evidence.strip() for item in result.liked if item.statement.strip()
-            ],
-            disliked_evidence=[
-                item.speech_evidence.strip() for item in result.disliked if item.statement.strip()
-            ],
+        return _video_result(
+            result,
+            transcript=result.speech_transcript.strip(),
             model=self.model,
+            source=VIDEO_SOURCE,
         )
+
+    def analyze_letsplay_transcript(
+        self,
+        *,
+        game_title: str,
+        transcript: str,
+        language: str,
+        start_seconds: int,
+        end_seconds: int,
+    ) -> YouTubeVideoResult:
+        """Analyse subtitles the caller already fetched — a plain text call any model can serve.
+
+        This is the main path precisely because it is ordinary text: no media upload, no
+        multimodal quota, and evidence quotes are checked against a transcript the model
+        never got to rewrite.
+        """
+        text = transcript.strip()
+        if not text:
+            raise ValueError("analyze_letsplay_transcript needs a non-empty transcript")
+        result = self._generate(
+            build_transcript_prompt(
+                game_title,
+                text,
+                language=language,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+            ),
+            YOUTUBE_TRANSCRIPT_SYSTEM_PROMPT,
+            TranscriptInsight,
+        )
+        return _video_result(result, transcript=text, model=self.model, source=TRANSCRIPT_SOURCE)
+
+
+def _video_result(
+    result: VideoInsight | TranscriptInsight, *, transcript: str, model: str, source: str
+) -> YouTubeVideoResult:
+    liked = [item for item in result.liked if item.statement.strip()]
+    disliked = [item for item in result.disliked if item.statement.strip()]
+    return YouTubeVideoResult(
+        has_useful_commentary=result.has_useful_commentary,
+        speech_transcript=transcript,
+        overall_opinion_evidence=result.overall_opinion_evidence.strip(),
+        overall_impression=result.overall_impression.strip(),
+        liked=[item.statement.strip() for item in liked],
+        disliked=[item.statement.strip() for item in disliked],
+        liked_evidence=[item.speech_evidence.strip() for item in liked],
+        disliked_evidence=[item.speech_evidence.strip() for item in disliked],
+        model=model,
+        source=source,
+    )
 
 
 def _first_json_object(text: str) -> Any:
