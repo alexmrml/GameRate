@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select
 
+from app.collectors.gemini import GeminiTemporaryError, GeminiUnavailable
 from app.db import SessionLocal
 from app.models import (
     CrawlStatus,
@@ -15,14 +16,16 @@ from app.models import (
     GamePlatform,
     GameReview,
     ProcessingRun,
+    ReviewSummary,
     RunStatus,
     RunTrigger,
 )
-from app.services import crawl
+from app.services import crawl, pipeline
 from app.services.crawl import STAGE_BROWSE, STAGE_NEW_RELEASES
+from app.services.enrichment import EnrichmentSession
 from app.services.pipeline import execute_run
 from app.services.runs import enqueue_manual_run, enqueue_scheduled_run
-from tests.conftest import StubMetacriticClient, build_snapshot
+from tests.conftest import StubGeminiClient, StubMetacriticClient, build_snapshot
 
 DAY_ONE = date(2026, 8, 21)
 DAY_TWO = date(2026, 8, 22)
@@ -267,3 +270,100 @@ def test_progress_and_current_game_are_published_during_the_run(frozen_day: DayC
 
     assert seen[0] == (0, 2, "Collecting alpha (1/2)")
     assert seen[1] == (1, 2, "Collecting beta (2/2)")
+
+
+def rich_stub(*slugs: str) -> StubMetacriticClient:
+    """Games with enough reviews per audience to be worth a summary."""
+    return stub(
+        new_releases=list(slugs),
+        snapshots={slug: build_snapshot(slug, reviews=4) for slug in slugs},
+    )
+
+
+def test_ai_enrichment_runs_inside_the_batch_and_extends_progress(
+    frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemini = StubGeminiClient()
+    monkeypatch.setattr(
+        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+    )
+
+    result = run_batch(rich_stub("alpha", "beta"))
+
+    assert result["status"] is RunStatus.SUCCEEDED
+    assert result["message"] == "Processed 2 games · AI: 2 enriched"
+    assert result["progress_total"] == 4  # two collected, then two analysed
+    assert result["progress_current"] == 4
+    ai = result["details"]["ai"]
+    assert ai == {
+        "enabled": True,
+        "model": "test-model",
+        "planned": 2,
+        "generated": 2,
+        "failed": 0,
+        "skipped": 0,
+        "calls": 4,
+        "games": [
+            {
+                "title": "Alpha",
+                "summaries": {"critics": "generated", "users": "generated"},
+                "tags": "generated",
+            },
+            {
+                "title": "Beta",
+                "summaries": {"critics": "generated", "users": "generated"},
+                "tags": "generated",
+            },
+        ],
+    }
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 4
+
+
+def test_a_gemini_failure_does_not_fail_the_crawl(
+    frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemini = StubGeminiClient(review_error=GeminiTemporaryError("503 model overloaded"))
+    monkeypatch.setattr(
+        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+    )
+
+    result = run_batch(rich_stub("alpha", "beta"))
+
+    assert result["status"] is RunStatus.SUCCEEDED
+    assert "2 AI failures" in result["message"]
+    assert result["details"]["ai"]["failed"] == 2
+    assert len(gemini.review_calls) == 2  # the second game was still attempted
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Game)) == 2
+        assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 0
+
+
+def test_a_rejected_key_stops_enrichment_but_keeps_the_crawl_result(
+    frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemini = StubGeminiClient(review_error=GeminiUnavailable("403 API key not valid"))
+    monkeypatch.setattr(
+        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+    )
+
+    result = run_batch(rich_stub("alpha", "beta", "gamma"))
+
+    assert result["status"] is RunStatus.SUCCEEDED
+    ai = result["details"]["ai"]
+    assert "403" in ai["disabled_reason"]
+    assert ai["failed"] == 1
+    assert ai["skipped"] == 2
+    assert len(gemini.review_calls) == 1  # no further calls after the fatal answer
+    assert len(game_slugs()) == 3
+
+
+def test_enrichment_is_absent_from_the_run_when_no_key_is_configured(
+    frozen_day: DayClock,
+) -> None:
+    result = run_batch(rich_stub("alpha"))
+
+    ai = result["details"]["ai"]
+    assert ai["enabled"] is False
+    assert ai["disabled_reason"] == "GEMINI_API_KEY is not configured"
+    assert result["message"] == "Processed 1 games"

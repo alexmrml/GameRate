@@ -58,6 +58,10 @@ def test_game_page_reads_metadata_video_and_platform_metascores() -> None:
         "https://www.metacritic.com/a/img/catalog/provider/6/3/6-1-824862-13.jpg"
     )
     assert game.video_url == "https://cdn.jwplayer.com/players/OXExoEAD.html"
+    assert game.esrb_rating == "M"
+    # Metacritic's own genre-peer carousel, which similarity matching reads as a signal.
+    assert "hades-ii" in game.related_slugs
+    assert game.slug not in game.related_slugs
 
     scores = {platform.slug: platform.metascore for platform in game.platforms}
     assert scores == {
@@ -81,6 +85,8 @@ def test_multi_platform_game_keeps_per_platform_scores_apart() -> None:
     assert by_slug["xbox-series-x"].critic_review_count == 7
     assert by_slug["pc"].metascore is None
     assert game.video_url is None
+    assert game.esrb_rating == "E"
+    assert "madden-nfl-2003" in game.related_slugs
 
 
 def test_incomplete_game_page_parses_without_inventing_data() -> None:
@@ -93,6 +99,7 @@ def test_incomplete_game_page_parses_without_inventing_data() -> None:
     assert game.platforms[0].metascore is None
     assert game.platforms[0].userscore is None
     assert game.cover_image_url is not None
+    assert game.esrb_rating is None
 
 
 def test_critic_reviews_carry_score_publication_and_platform() -> None:

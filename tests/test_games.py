@@ -1,10 +1,12 @@
 from datetime import date
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from app.collectors.metacritic import PlatformScore
 from app.db import SessionLocal
-from app.models import Game, GamePlatform, Platform
+from app.models import Audience, Game, GamePlatform, Platform, ReviewSummary, Tag, game_tags
 from app.services.games import apply_game_snapshot, upsert_discovered_game
 from app.time import utc_now
 from tests.conftest import build_snapshot
@@ -103,3 +105,117 @@ def test_snapshot_is_stored_and_rendered_on_the_detail_page(
     assert "Critic opinion 0 about cover-game" in response.text
     assert "Player opinion 1 about cover-game" in response.text
     assert "XBOX-SERIES-X" in response.text
+
+
+def catalogue_game(
+    slug: str,
+    *,
+    title: str,
+    platforms: list[tuple[str, int | None, str | None, int]],
+    release: date | None = None,
+) -> Game:
+    """A game whose platforms carry different scores and review counts."""
+    snapshot = build_snapshot(slug, title=title, reviews=0, platforms=())
+    snapshot.release_date = release
+    for name, metascore, userscore, critics in platforms:
+        snapshot.platforms.append(
+            PlatformScore(
+                slug=name,
+                name=name.upper(),
+                metascore=metascore,
+                userscore=Decimal(userscore) if userscore else None,
+                critic_review_count=critics,
+            )
+        )
+    with SessionLocal() as db:
+        game = apply_game_snapshot(db, snapshot)
+        db.commit()
+        return game
+
+
+def test_catalogue_shows_the_lead_platform_score_and_release_date(
+    authenticated_client: TestClient,
+) -> None:
+    catalogue_game(
+        "multi",
+        title="Multi Platform Game",
+        release=date(2026, 5, 4),
+        platforms=[("pc", 91, "9.1", 3), ("ps5", 74, "6.2", 18)],
+    )
+
+    response = authenticated_client.get("/games")
+    assert response.status_code == 200
+    body = response.text
+    assert "2026-05-04" in body
+    # PS5 has the most critic reviews, so its scores represent the game. The assertions
+    # match rendered cells, because the page also carries a random CSRF token.
+    assert "<strong>74</strong>" in body
+    assert "<strong>6.2</strong>" in body
+    assert "<strong>91</strong>" not in body
+    assert "Updated" not in body
+
+
+def test_platform_badges_link_to_the_platform_filter(authenticated_client: TestClient) -> None:
+    catalogue_game("badges", title="Badge Game", platforms=[("pc", 80, "8.0", 5)])
+
+    response = authenticated_client.get("/games")
+    assert "/games?platform=pc" in response.text
+
+    filtered = authenticated_client.get("/games?platform=pc")
+    assert "Badge Game" in filtered.text
+
+
+def test_sorting_uses_the_lead_platform_score_and_keeps_unrated_last(
+    authenticated_client: TestClient,
+) -> None:
+    catalogue_game(
+        "high", title="High Lead", platforms=[("pc", 60, "6.0", 30), ("ps5", 95, None, 1)]
+    )
+    catalogue_game("mid", title="Mid Lead", platforms=[("pc", 82, "8.2", 12)])
+    catalogue_game("none", title="Unrated Game", platforms=[("pc", None, None, 0)])
+
+    body = authenticated_client.get("/games?sort=metascore").text
+    order = [body.index(title) for title in ("Mid Lead", "High Lead", "Unrated Game")]
+    assert order == sorted(order)
+    # Nothing invents a score for the unrated game.
+    assert "not rated" in body
+    assert ">0<" not in body
+
+
+def test_detail_page_shows_summaries_tags_and_similar_games(
+    authenticated_client: TestClient,
+) -> None:
+    now = utc_now()
+    first = catalogue_game("hero-a", title="Hero A", platforms=[("pc", 80, "8.0", 10)])
+    second = catalogue_game("hero-b", title="Hero B", platforms=[("pc", 78, "7.9", 9)])
+    with SessionLocal() as db:
+        tag = Tag(slug="platforming", name="platforming", facet="mechanics")
+        db.add(tag)
+        db.flush()
+        for game_id in (first.id, second.id):
+            db.execute(game_tags.insert().values(game_id=game_id, tag_id=tag.id))
+        db.add(
+            ReviewSummary(
+                game_id=first.id,
+                audience=Audience.CRITICS,
+                summary="Critics enjoyed the pacing.",
+                verdict="positive",
+                positives=["Tight level design"],
+                negatives=["Short campaign"],
+                source_count=7,
+                model_name="test-model",
+                generated_at=now,
+                updated_at=now,
+            )
+        )
+        db.commit()
+
+    body = authenticated_client.get(f"/games/{first.id}").text
+    assert "Critics enjoyed the pacing." in body
+    assert "Tight level design" in body
+    assert "Short campaign" in body
+    assert "From 7 critic reviews" in body
+    assert "No player reviews collected yet." in body
+    assert "Hero B" in body
+    assert f"/games/{second.id}" in body
+    assert "Shared gameplay: platforming" in body

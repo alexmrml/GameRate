@@ -18,7 +18,23 @@ os.environ["CRAWL_USER_REVIEWS_PER_PLATFORM"] = "25"
 os.environ["CRAWL_MAX_PLATFORMS"] = "8"
 os.environ["SCHEDULE_INTERVAL_MINUTES"] = "60"
 os.environ["RUN_STALE_SECONDS"] = "900"
+# The suite must never reach Gemini: tests that exercise enrichment inject a fake client.
+os.environ["GEMINI_API_KEY"] = ""
+os.environ["GEMINI_MODEL"] = "test-model"
+os.environ["AI_ENABLED"] = "true"
+os.environ["AI_MIN_REVIEWS"] = "3"
+os.environ["AI_MAX_GAMES_PER_RUN"] = "20"
+os.environ["AI_REFRESH_MIN_NEW_REVIEWS"] = "5"
+os.environ["AI_REFRESH_MIN_GROWTH"] = "0.25"
+os.environ["AI_MIN_REFRESH_INTERVAL_HOURS"] = "12"
 
+from app.collectors.gemini import (  # noqa: E402
+    AudienceResult,
+    GameContext,
+    ReviewAnalysis,
+    ReviewExcerpt,
+    TagResult,
+)
 from app.collectors.metacritic import (  # noqa: E402
     CRITIC_AUDIENCE,
     USER_AUDIENCE,
@@ -141,6 +157,55 @@ class StubMetacriticClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class StubGeminiClient:
+    """Stands in for GeminiClient in enrichment tests; records every call."""
+
+    def __init__(
+        self,
+        *,
+        model: str = "test-model",
+        review_error: Exception | None = None,
+        tag_error: Exception | None = None,
+        liked: list[str] | None = None,
+        disliked: list[str] | None = None,
+        facets: dict[str, list[str]] | None = None,
+    ) -> None:
+        self.model = model
+        self.review_error = review_error
+        self.tag_error = tag_error
+        self.liked = liked or ["The combat rewards timing"]
+        self.disliked = disliked or ["Long loading screens"]
+        self.facets = facets if facets is not None else {"mechanics": ["action-combat"]}
+        self.review_calls: list[tuple[str, int, int]] = []
+        self.tag_calls: list[str] = []
+
+    def analyze_reviews(
+        self, game: GameContext, critics: list[ReviewExcerpt], users: list[ReviewExcerpt]
+    ) -> ReviewAnalysis:
+        self.review_calls.append((game.title, len(critics), len(users)))
+        if self.review_error:
+            raise self.review_error
+        return ReviewAnalysis(
+            critics=self._audience("critics") if critics else None,
+            users=self._audience("players") if users else None,
+            model=self.model,
+        )
+
+    def _audience(self, label: str) -> AudienceResult:
+        return AudienceResult(
+            liked=list(self.liked),
+            disliked=list(self.disliked),
+            verdict=f"{label} verdict",
+            summary=f"Summary for {label}",
+        )
+
+    def derive_tags(self, game: GameContext) -> TagResult:
+        self.tag_calls.append(game.title)
+        if self.tag_error:
+            raise self.tag_error
+        return TagResult(facets=dict(self.facets), model=self.model)
 
 
 @pytest.fixture(autouse=True)
