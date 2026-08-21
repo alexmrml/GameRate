@@ -121,40 +121,100 @@ Web and worker share configuration and models but no process memory.
 ## YouTube analysis
 
 - `youtube_analyses` has one durable state row per game. It stores success as well as
-  `no_candidate`, provider/quota failures, unavailable sources and `no_useful_commentary`, plus
-  the complete candidate cache and attempted video IDs. Do not replace this with in-memory retry
-  state or search again while `next_retry_at` is in the future.
-- Discovery makes exactly one popularity-ordered `search.list` call and one batched `videos.list`
-  call per search. It does not use `videoDuration`; Shorts and irrelevant formats are rejected
-  after metadata hydration, then the suitable candidate with the highest `viewCount` wins. A
-  failed/silent source advances through cached candidates before another search is allowed.
-- Gemini receives a public YouTube URL with `VideoMetadata.start_offset/end_offset`; captions API,
-  video downloads and audio downloads are intentionally absent. The configured tail fragment is
-  15 minutes by default, or the whole video when shorter.
-- Video opinion output is speech-grounded. The overall conclusion and each liked/disliked point
-  carry verbatim speech evidence; only evidence found in the stored transcript is accepted.
+  `no_candidate`, provider/quota failures, unavailable sources, `no_transcript` and
+  `no_useful_commentary`, plus the complete candidate cache and attempted video IDs. Do not
+  replace this with in-memory retry state or search again while `next_retry_at` is ahead.
+- Discovery makes exactly one popularity-ordered `search.list` call and one batched
+  `videos.list` call per search. It does not use `videoDuration`; Shorts and irrelevant
+  formats are rejected after metadata hydration, then the suitable candidate with the
+  highest `viewCount` wins. A failed/silent source advances through cached candidates
+  before another search is allowed.
+- **The main path is subtitles, not video.** `app/collectors/transcript.py` uses yt-dlp with
+  `download=False` to read the player response, then fetches the `json3` timed-text track
+  over plain HTTP. No video or audio stream is ever downloaded and no temporary file is
+  written. Sending the video to Gemini was quota-bound to roughly one game per run; reading
+  captions costs about 5 seconds and one ordinary text call, which is why the per-run cap is
+  now 5 games and the one-game limit survives only on the fallback.
+- Caption track choice is a correctness rule, not a preference. YouTube publishes machine
+  *translations* of the automatic captions under every language code, marked by `tlang=` in
+  the URL; a translation of a transcription cannot support a verbatim quote. Only original
+  tracks are eligible, manual subtitles beat automatic ones, and `info["language"]` decides
+  which original wins.
+- `select_tail_window` scans backwards from the end in one-fifth-window steps and takes the
+  *latest* window that still clears `youtube.min_words_per_minute`. That bar (15 wpm) is an
+  anomaly filter, not a ranking: measured let's-play tails run 40-100 wpm, with Russian
+  speech at the low end, so only real silence — credits, menus, outro music, an idle camera —
+  pushes the window earlier. The search stops three windows back from the end, so "near the
+  end" stays meaningful for a nine-hour stream. Verified live: a 9.7 h stream tails at 89
+  wpm, a 5.2 h Russian one at 51 wpm, and a "no commentary" walkthrough publishes no
+  captions at all.
+- `analyze_letsplay_transcript` is a plain text call, so `gemma-4-31b-it` serves the main
+  path. Its schema deliberately has no `speech_transcript` field: the transcript is an
+  input, and the evidence check is only meaningful against text the model never rewrote.
+  The stored transcript is always the fetched one.
+- Gemini Video (`youtube.video_fallback_model`, `gemini-3.5-flash`) is now the fallback and
+  only runs for a source whose *captions* are missing — never for one yt-dlp could not read
+  at all. `youtube.max_video_fallbacks_per_run` (1) is what keeps the old quota limit off the
+  main path. Served Gemma has no audio track and cannot take the fallback's place.
+- Reading subtitles makes no model call, so one game may walk up to `MAX_TRANSCRIPT_ATTEMPTS`
+  cached candidates looking for one with captions before the fallback budget is spent. One
+  game still yields at most one summary, from one video.
+- Output is speech-grounded. The overall conclusion and each liked/disliked point carry
+  verbatim speech evidence; only evidence found in the stored transcript is accepted.
   Tutorial steps, useful items and momentary frustration are not an overall game opinion. A
   source without a supported overall view is `no_useful_commentary`, not a fabricated summary.
-- Video analysis has a separate model/session/status from review/tag enrichment. The default is
-  `gemini-3.5-flash`, one video per run because live 15-minute calls took minutes. Served Gemma 4
-  31B has no audio track and cannot replace Gemini for creator-speech analysis.
-- `GOOGLE_CLOUD_API_KEY` and `GEMINI_API_KEY` are environment-only. YouTube feature/model/fragment/
-  batch tunables use `app/services/app_settings.py`; no YouTube failure may fail the crawl or stop
-  ordinary Gemini enrichment.
+- `youtube.max_searches_per_run` (3) exists because `search.list` costs 100 of the 10 000
+  daily Data API units: 24 hourly runs times 5 games would exceed the quota. Hitting the cap
+  yields the non-persisted `search_budget` outcome, which leaves the game pending for the
+  next run instead of burning its retry window.
+- `GOOGLE_CLOUD_API_KEY` and `GEMINI_API_KEY` are environment-only. YouTube feature/model/
+  fragment/density/batch tunables use `app/services/app_settings.py`; no YouTube failure may
+  fail the crawl or stop ordinary Gemini enrichment.
+
+## Generated language
+
+- Every sentence the models generate — review summaries, verdicts, tags' prose, let's-play
+  findings — is written in **Russian**, whatever language the source is in. The rule lives in
+  `RUSSIAN_OUTPUT_RULE` and is appended to the review and both YouTube system prompts, so a
+  new prompt gets it by concatenation rather than by remembering to restate it.
+- Sources are never translated. Collected reviews are stored and displayed verbatim, and the
+  quote fields (`speech_evidence`, `overall_opinion_evidence`) stay in the creator's own
+  language — that is what makes the transcript containment check work at all.
+- Prompt examples were rewritten in Russian along with the rule. A model steered by English
+  examples drifts back into English regardless of the instruction.
+- The interface chrome is still English on purpose; translating it is a separate stage.
 
 ## Testing
 
-Tests never touch the live site or Gemini. `tests/fixtures/metacritic/` holds trimmed captures of
-real pages: the genuine `__NUXT_DATA__` payload with unrelated components removed, verified to
-parse identically to the page it came from. Gemini is exercised through a fake SDK object
-(`tests/test_gemini_client.py`) and a stub client (`tests/conftest.py`). `tests/conftest.py` pins
-collection and AI settings through environment variables, so a developer's `.env` — which does
-hold a real key — cannot change test outcomes or trigger a live call.
+Tests never touch the live site, YouTube or Gemini. `tests/fixtures/metacritic/` holds trimmed
+captures of real pages: the genuine `__NUXT_DATA__` payload with unrelated components removed,
+verified to parse identically to the page it came from. Gemini is exercised through a fake SDK
+object (`tests/test_gemini_client.py`) and a stub client (`tests/conftest.py`). yt-dlp never runs
+in tests: `TranscriptClient` takes `extract_info` and `fetch_url` callables, so the suite feeds it
+recorded caption structures instead. `tests/conftest.py` pins collection, AI and YouTube settings
+through environment variables, so a developer's `.env` — which does hold real keys — cannot change
+test outcomes or trigger a live call.
 
 ## Current state and next work
 
 Auth, catalogue and detail pages, activity queue with SSE progress, settings, health, worker
 heartbeat, Compose, CI, the Metacritic pipeline, Gemini review/tag enrichment, weighted similar
-games, and YouTube let's-play discovery/speech analysis are in place. Next work is the final
-product design. Keep new integrations behind service-layer boundaries and store raw provider
-identifiers/status for idempotency.
+games, and YouTube let's-play discovery/subtitle analysis are in place. Model output is Russian.
+
+Next work, in the order it matters:
+
+- **Interface translation.** Only generated text is Russian today; every template label, status
+  string, table header and empty-state sentence in `app/templates/` is still English, and the
+  `status.replace('_', ' ')` rendering on the detail page prints raw status slugs at the user.
+  Decide whether statuses get a display map or the UI stops showing them before translating.
+- **Discovery quality.** The subtitle path is cheap enough that discovery is now the bottleneck:
+  live runs return `no_candidate` for most freshly released indie games, because
+  `candidate_rejection_reason` demands a positive gameplay signal that small-channel let's-plays
+  often lack. Loosening it is a change to `app/collectors/youtube.py`, not to the analysis path.
+- **Prompt-version backlog.** `PROMPT_VERSION` and `YOUTUBE_PROMPT_VERSION` were both bumped, so
+  every stored summary is stale and regenerates at `ai.max_games_per_run` (20) per run; a ~190
+  game catalogue takes about ten runs to come back. That is by design — do not bulk-edit rows.
+- Final product design.
+
+Keep new integrations behind service-layer boundaries and store raw provider identifiers/status
+for idempotency.

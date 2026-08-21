@@ -11,7 +11,7 @@ docker compose up --build -d
 docker compose exec web gamerate create-user admin
 ```
 
-Open <http://localhost:8000/login>. The password prompt does not echo input or put it into shell
+Open <http://localhost:8000/login> (or whichever `WEB_PORT` you set). The password prompt does not echo input or put it into shell
 history. Run lint and tests locally with `pip install -e ".[dev]"`, `ruff check .`, and `pytest`.
 
 Outside Compose, start the two processes independently with `uvicorn app.main:app` and
@@ -58,7 +58,9 @@ reads the collected reviews and answers three things per audience — what peopl
 disliked, and an overall summary — with critics and players kept strictly apart. A game with no
 reviews, or with fewer than `AI_MIN_REVIEWS` for an audience, stays empty: the page says so
 instead of showing invented text. The same pass derives tags from the description and metadata,
-and `/games/{id}` uses them to list similar games with the reason for each match.
+and `/games/{id}` uses them to list similar games with the reason for each match. Summaries are
+written in Russian whatever language the reviews are in; the reviews themselves are stored and
+shown untranslated.
 
 Set `GEMINI_API_KEY` in `.env` to switch it on; without a key the crawler runs exactly as before
 and the run records why enrichment was skipped. The default model is `gemma-4-31b-it`, because
@@ -94,25 +96,42 @@ the remaining video with the most views. Empty searches and provider errors are 
 hourly run does not repeat them immediately; candidates are cached so a silent or unavailable
 video can advance to the next result without another search.
 
-Gemini receives the public YouTube URL directly — the application never calls the captions API
-and never downloads video or audio. Only the configured number of minutes at the end of the video
-is sent (15 by default, or the whole available video when shorter). The structured response keeps
-a speech transcript, overall impression, liked/disliked points and a verbatim speech quote for
-each finding. A result is shown as useful only when its overall quote is found in the transcript;
-otherwise the source gets a retryable `no_useful_commentary` status.
+The analysis itself reads the video's **subtitles**, not the video. yt-dlp fetches the caption
+track — the creator's own subtitles when they exist, otherwise YouTube's automatic ones — without
+downloading any video or audio. Machine-translated caption tracks are ignored, so the transcript
+is always in the language actually spoken.
 
-YouTube has its own model and failure state, so quota, search, unavailable-video and Gemini errors
-cannot fail Metacritic collection or ordinary review/tag enrichment. Video calls can take several
-minutes, which is why the default is one game per run. The `/settings` page can change the feature
-toggle, model, fragment length and per-run cap without exposing either provider key.
+Rather than taking a fixed last-15-minutes slice, the app scans backwards from the end and keeps
+the latest fragment that still contains speech: credits, menus and a silent outro push the window
+earlier, a creator who talks to the last second is analysed at the very end. That text goes to
+`gemma-4-31b-it` as an ordinary text request, which is fast and cheap enough to analyse several
+games per run.
+
+If a video publishes no usable subtitles at all — a "no commentary" walkthrough, for instance —
+the app falls back to sending the video itself to a multimodal Gemini model. That call is slow
+and quota-hungry, so it is capped at one per run; the subtitle path is not.
+
+Results are written in Russian regardless of the video's language, while the quoted evidence stays
+in the creator's own words. The structured response keeps an overall impression, liked/disliked
+points and a verbatim quote for each finding. A result is shown as useful only when its overall
+quote is found in the transcript; otherwise the source gets a retryable status and the next run
+tries the next candidate.
+
+YouTube has its own models and failure state, so quota, search, unavailable-video and Gemini
+errors cannot fail Metacritic collection or ordinary review/tag enrichment. The `/settings` page
+can change every knob below the key rows without exposing either provider key.
 
 | Variable | Meaning |
 | --- | --- |
 | `GOOGLE_CLOUD_API_KEY` | YouTube Data API key; environment-only |
 | `YOUTUBE_ANALYSIS_ENABLED` | Enable/disable the YouTube phase |
-| `YOUTUBE_ANALYSIS_MODEL` | Multimodal Gemini model (`gemini-3.5-flash` by default) |
-| `YOUTUBE_ANALYSIS_FRAGMENT_MINUTES` | Minutes analyzed from the end of the video |
-| `YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN` | Backlog cap per processing run (default 1) |
+| `YOUTUBE_ANALYSIS_MODEL` | Model reading the subtitle fragment (`gemma-4-31b-it`) |
+| `YOUTUBE_VIDEO_FALLBACK_MODEL` | Multimodal model used only when subtitles are missing |
+| `YOUTUBE_ANALYSIS_FRAGMENT_MINUTES` | Length of the analyzed fragment near the end |
+| `YOUTUBE_TRANSCRIPT_MIN_WORDS_PER_MINUTE` | Speech rate below which a fragment counts as silence |
+| `YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN` | Backlog cap per processing run (default 5) |
+| `YOUTUBE_MAX_SEARCHES_PER_RUN` | Data API searches per run; each costs 100 of 10 000 daily units |
+| `YOUTUBE_MAX_VIDEO_FALLBACKS_PER_RUN` | Multimodal video calls per run (default 1) |
 | `YOUTUBE_SEARCH_MAX_RESULTS` | Candidates fetched by the single search request |
 | `YOUTUBE_RETRY_INTERVAL_HOURS` | Delay after provider/source failures |
 | `YOUTUBE_NO_RESULT_REFRESH_DAYS` | When an empty search may be repeated |
