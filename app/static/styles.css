@@ -136,3 +136,10 @@ code { padding: 2px 5px; border-radius: 4px; background: var(--surface); font-fa
 .similar-card strong { display: block; }
 .match-score { font-size: 12px; color: var(--accent); }
 .reason-list { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--muted); }
+.youtube-analysis { padding: 24px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.youtube-analysis h3 a { color: var(--text); }
+.youtube-meta { margin-bottom: 10px; }
+.youtube-findings { margin-top: 18px; gap: 36px; }
+.speech-evidence { margin: 18px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.speech-evidence summary { cursor: pointer; color: var(--muted); font-weight: 650; }
+.speech-evidence p { margin-top: 10px; white-space: pre-wrap; }

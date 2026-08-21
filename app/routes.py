@@ -41,6 +41,11 @@ from app.templates import templates
 from app.time import utc_now
 
 router = APIRouter()
+ENVIRONMENT_ONLY_SETTING_KEYS = {"GEMINI_API_KEY", "GOOGLE_CLOUD_API_KEY"}
+
+
+def _environment_setting_name(key: str) -> str:
+    return key.upper().replace(".", "_").replace("-", "_")
 
 
 def page_context(request: Request, auth: AuthContext, **extra: object) -> dict[str, object]:
@@ -198,7 +203,7 @@ def game_detail(
             selectinload(Game.genres),
             selectinload(Game.tags),
             selectinload(Game.review_summaries),
-            selectinload(Game.youtube_analyses),
+            selectinload(Game.youtube_analysis),
         )
     )
     if game is None:
@@ -253,6 +258,7 @@ def game_detail(
             user_summary=summaries.get(Audience.USERS),
             similar_games=similar,
             tags_by_facet=_tags_by_facet(game),
+            format_duration=_format_duration,
         ),
     )
 
@@ -262,6 +268,13 @@ def _tags_by_facet(game: Game) -> dict[str, list[Any]]:
     for tag in sorted(game.tags, key=lambda item: (item.facet or "", item.name)):
         grouped.setdefault(tag.facet or "descriptors", []).append(tag)
     return grouped
+
+
+def _format_duration(total_seconds: int | None) -> str:
+    seconds = max(total_seconds or 0, 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
 @router.get("/activity", response_class=HTMLResponse)
@@ -356,7 +369,11 @@ def settings_page(
     auth: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    setting_rows = db.scalars(select(AppSetting).order_by(AppSetting.key)).all()
+    setting_rows = [
+        row
+        for row in db.scalars(select(AppSetting).order_by(AppSetting.key))
+        if _environment_setting_name(row.key) not in ENVIRONMENT_ONLY_SETTING_KEYS
+    ]
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
@@ -376,6 +393,9 @@ def update_setting(
     normalized_key = key.strip()
     if not normalized_key or len(normalized_key) > 120:
         raise HTTPException(status_code=422, detail="Invalid setting key")
+    secret_name = _environment_setting_name(normalized_key)
+    if secret_name in ENVIRONMENT_ONLY_SETTING_KEYS:
+        raise HTTPException(status_code=422, detail="API keys must be configured in environment")
     try:
         parsed_value = json.loads(value)
     except json.JSONDecodeError:

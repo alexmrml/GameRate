@@ -76,6 +76,42 @@
     </section>
   </div>
 
+  {% if game.youtube_analysis %}
+    {% set item = game.youtube_analysis %}
+    <section class="section youtube-analysis">
+      <h2>Let's-play perspective</h2>
+      {% if item.video_url %}
+        <h3><a href="{{ item.video_url }}" rel="noreferrer">{{ item.video_title or item.video_id }}</a></h3>
+        <p class="youtube-meta muted">
+          {{ item.channel_title or 'Unknown channel' }}
+          {% if item.view_count is not none %} · {{ '{:,}'.format(item.view_count) }} views{% endif %}
+          {% if item.duration_seconds %} · {{ format_duration(item.duration_seconds) }}{% endif %}
+          {% if item.fragment_start_seconds is not none %} · analyzed {{ format_duration(item.fragment_start_seconds) }}–{{ format_duration(item.fragment_end_seconds) }}{% endif %}
+        </p>
+        <a class="button button-quiet" href="{{ item.video_url }}" rel="noreferrer">Watch on YouTube</a>
+      {% endif %}
+      {% if item.status == 'success' %}
+        <p class="verdict">{{ item.summary }}</p>
+        <div class="two-column youtube-findings">
+          <div>
+            <h4>What the creator liked</h4>
+            <ul class="insight-list">{% for point in item.liked or [] %}<li class="liked">{{ point }}</li>{% else %}<li class="muted">No clear positive point in the fragment.</li>{% endfor %}</ul>
+          </div>
+          <div>
+            <h4>What the creator disliked</h4>
+            <ul class="insight-list">{% for point in item.disliked or [] %}<li class="disliked">{{ point }}</li>{% else %}<li class="muted">No clear negative point in the fragment.</li>{% endfor %}</ul>
+          </div>
+        </div>
+        {% if item.speech_transcript %}
+          <details class="speech-evidence"><summary>Speech evidence from the fragment</summary><p>{{ item.speech_transcript }}</p></details>
+        {% endif %}
+        <span class="muted">{{ item.model_name }} · {{ item.analyzed_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+      {% else %}
+        <p class="empty-copy">YouTube analysis status: {{ item.status.replace('_', ' ') }}{% if item.status_reason %} — {{ item.status_reason }}{% endif %}</p>
+      {% endif %}
+    </section>
+  {% endif %}
+
   <section class="section">
     <h2>Similar games</h2>
     <div class="similar-grid">
@@ -117,12 +153,4 @@
     </section>
   </div>
 
-  {% if game.youtube_analyses %}
-    <section class="section">
-      <h2>YouTube analysis</h2>
-      {% for item in game.youtube_analyses %}
-        <article class="text-block"><h3>{{ item.video_title or item.video_id }}</h3><p>{{ item.summary or 'Analysis pending.' }}</p></article>
-      {% endfor %}
-    </section>
-  {% endif %}
 {% endblock %}

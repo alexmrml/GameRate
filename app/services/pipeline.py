@@ -27,11 +27,21 @@ from app.services.crawl import (
 )
 from app.services.enrichment import EnrichmentSession, GameEnrichment
 from app.services.games import apply_game_snapshot
+from app.services.youtube import (
+    NO_CANDIDATE,
+    NO_USEFUL_COMMENTARY,
+    SUCCESS,
+    UNCHANGED,
+    YouTubeEnrichmentSession,
+    YouTubeOutcome,
+    youtube_needs_work,
+)
 from app.time import utc_now
 
 logger = logging.getLogger("gamerate.pipeline")
 MAX_TRACKED_ERRORS = 20
 MAX_TRACKED_AI_GAMES = 30
+MAX_TRACKED_YOUTUBE_GAMES = 30
 
 
 def _touch(db: Session, run: ProcessingRun, message: str | None = None, **fields: Any) -> None:
@@ -127,6 +137,8 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
             )
 
     ai_details = enrich_collected_games(db, run, collected_ids, offset=len(plan.slugs))
+    youtube_offset = len(plan.slugs) + int(ai_details.get("planned") or 0)
+    youtube_details = enrich_youtube_games(db, run, collected_ids, offset=youtube_offset)
 
     # A fresh dict, because SQLAlchemy tracks JSON columns by identity, not by content.
     details = {
@@ -136,6 +148,7 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
         "errors": errors[:MAX_TRACKED_ERRORS],
         "next_cursor": plan.next_cursor,
         "ai": ai_details,
+        "youtube": youtube_details,
     }
 
     ai_note = _ai_note(ai_details)
@@ -151,7 +164,7 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
     else:
         status = RunStatus.SUCCEEDED
         message = f"Processed {succeeded} games"
-    message = f"{message}{ai_note}"
+    message = f"{message}{ai_note}{_youtube_note(youtube_details)}"
 
     finish_state(
         db,
@@ -281,6 +294,116 @@ def _ai_note(ai_details: dict[str, Any]) -> str:
     if ai_details.get("disabled_reason"):
         parts.append("AI stopped")
     return f" · AI: {', '.join(parts)}" if parts else ""
+
+
+def enrich_youtube_games(
+    db: Session,
+    run: ProcessingRun,
+    collected_ids: list[uuid.UUID],
+    *,
+    offset: int,
+    session: YouTubeEnrichmentSession | None = None,
+) -> dict[str, Any]:
+    """Analyse current games first, then fill the catalogue backlog without blocking crawl."""
+    session = session or YouTubeEnrichmentSession(db)
+    summary: dict[str, Any] = {
+        "enabled": session.enabled,
+        "model": session.model,
+        "planned": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "no_candidate": 0,
+        "skipped": 0,
+        "search_calls": 0,
+        "gemini_calls": 0,
+        "games": [],
+    }
+    if not session.enabled:
+        summary["disabled_reason"] = session.disabled_reason
+        return summary
+
+    games = list(
+        db.scalars(
+            select(Game)
+            .options(selectinload(Game.youtube_analysis))
+            .order_by(Game.last_discovered_at.desc())
+        ).unique()
+    )
+    by_id = {game.id: game for game in games}
+    prioritized = [by_id[game_id] for game_id in collected_ids if game_id in by_id]
+    prioritized.extend(game for game in games if game.id not in set(collected_ids))
+    targets = [game for game in prioritized if youtube_needs_work(game.youtube_analysis)][
+        : max(session.max_games, 0)
+    ]
+    summary["planned"] = len(targets)
+    if not targets:
+        session.close()
+        return summary
+
+    _touch(
+        db,
+        run,
+        f"Analyzing YouTube let's-plays for {len(targets)} games",
+        progress_total=offset + len(targets),
+    )
+
+    try:
+        for index, game in enumerate(targets, start=1):
+            _touch(
+                db,
+                run,
+                f"YouTube analysis for {game.title} ({index}/{len(targets)})",
+                current_game_id=game.id,
+            )
+            try:
+                outcome = session.enrich_game(db, game)
+                db.commit()
+            except Exception as exc:  # the provider phase cannot fail completed collection
+                db.rollback()
+                logger.exception("YouTube enrichment crashed game=%s run=%s", game.id, run.id)
+                outcome = YouTubeOutcome(
+                    title=game.title,
+                    status="internal_error",
+                    error=f"{type(exc).__name__}: {exc}"[:500],
+                )
+
+            if outcome.status == SUCCESS:
+                summary["succeeded"] += 1
+            elif outcome.status == NO_CANDIDATE:
+                summary["no_candidate"] += 1
+            elif outcome.status == UNCHANGED:
+                summary["skipped"] += 1
+            elif outcome.status == NO_USEFUL_COMMENTARY or outcome.error:
+                summary["failed"] += 1
+            else:
+                summary["skipped"] += 1
+            if len(summary["games"]) < MAX_TRACKED_YOUTUBE_GAMES:
+                summary["games"].append(outcome.as_details())
+
+            _touch(db, run, run.message, progress_current=offset + index, current_game_id=None)
+    finally:
+        session.close()
+
+    summary["search_calls"] = session.search_calls
+    summary["gemini_calls"] = session.gemini_calls
+    if session.youtube_disabled_reason:
+        summary["youtube_disabled_reason"] = session.youtube_disabled_reason
+    if session.gemini_disabled_reason:
+        summary["gemini_disabled_reason"] = session.gemini_disabled_reason
+    return summary
+
+
+def _youtube_note(details: dict[str, Any]) -> str:
+    if not details.get("enabled"):
+        return ""
+    parts = []
+    if details.get("succeeded"):
+        parts.append(f"{details['succeeded']} analyzed")
+    if details.get("no_candidate"):
+        parts.append(f"{details['no_candidate']} without a candidate")
+    if details.get("failed"):
+        parts.append(f"{details['failed']} failed")
+    return f" · YouTube: {', '.join(parts)}" if parts else ""
 
 
 def build_client() -> MetacriticClient:
