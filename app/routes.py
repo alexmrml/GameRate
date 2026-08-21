@@ -23,8 +23,10 @@ from app.config import settings
 from app.db import SessionLocal, get_db
 from app.models import (
     AppSetting,
+    Audience,
     Game,
     GamePlatform,
+    GameReview,
     Platform,
     ProcessingRun,
     User,
@@ -182,10 +184,37 @@ def game_detail(
     )
     if game is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Game not found")
+
+    def latest_reviews(audience: Audience) -> list[GameReview]:
+        return list(
+            db.scalars(
+                select(GameReview)
+                .where(GameReview.game_id == game.id, GameReview.audience == audience)
+                .options(selectinload(GameReview.platform))
+                .order_by(GameReview.review_date.desc().nullslast(), GameReview.collected_at.desc())
+                .limit(10)
+            )
+        )
+
+    review_counts = dict(
+        db.execute(
+            select(GameReview.audience, func.count())
+            .where(GameReview.game_id == game.id)
+            .group_by(GameReview.audience)
+        ).all()
+    )
     return templates.TemplateResponse(
         request=request,
         name="game_detail.html",
-        context=page_context(request, auth, game=game),
+        context=page_context(
+            request,
+            auth,
+            game=game,
+            critic_reviews=latest_reviews(Audience.CRITICS),
+            user_reviews=latest_reviews(Audience.USERS),
+            critic_review_count=review_counts.get(Audience.CRITICS, 0),
+            user_review_count=review_counts.get(Audience.USERS, 0),
+        ),
     )
 
 
@@ -196,7 +225,10 @@ def activity_page(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     runs = db.scalars(
-        select(ProcessingRun).order_by(ProcessingRun.created_at.desc()).limit(100)
+        select(ProcessingRun)
+        .options(selectinload(ProcessingRun.current_game))
+        .order_by(ProcessingRun.created_at.desc())
+        .limit(100)
     ).all()
     workers = db.scalars(
         select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())
@@ -222,7 +254,10 @@ def create_run(
 def run_snapshot() -> dict[str, object]:
     with SessionLocal() as db:
         runs = db.scalars(
-            select(ProcessingRun).order_by(ProcessingRun.created_at.desc()).limit(20)
+            select(ProcessingRun)
+            .options(selectinload(ProcessingRun.current_game))
+            .order_by(ProcessingRun.created_at.desc())
+            .limit(20)
         ).all()
         workers = db.scalars(
             select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())
@@ -234,6 +269,9 @@ def run_snapshot() -> dict[str, object]:
                     "status": run.status.value,
                     "message": run.message,
                     "worker_id": run.worker_id,
+                    "progress_current": run.progress_current,
+                    "progress_total": run.progress_total,
+                    "current_game": run.current_game.title if run.current_game else None,
                     "updated_at": run.updated_at.isoformat(),
                 }
                 for run in runs

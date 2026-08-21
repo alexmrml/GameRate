@@ -22,17 +22,19 @@
     <h2>Processing runs</h2>
     <div class="table-wrap">
       <table id="runs-table">
-        <thead><tr><th>Created</th><th>Trigger</th><th>Status</th><th>Worker</th><th>Message</th></tr></thead>
+        <thead><tr><th>Created</th><th>Trigger</th><th>Status</th><th>Progress</th><th>Current game</th><th>Worker</th><th>Message</th></tr></thead>
         <tbody>
           {% for run in runs %}
             <tr data-run-id="{{ run.id }}">
               <td class="nowrap">{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
               <td>{{ run.trigger.value }}</td>
               <td><span class="status status-{{ run.status.value }}" data-field="status">{{ run.status.value }}</span></td>
+              <td class="nowrap" data-field="progress">{{ run.progress_current }}{% if run.progress_total %} / {{ run.progress_total }}{% endif %}</td>
+              <td data-field="current_game">{{ run.current_game.title if run.current_game else '—' }}</td>
               <td data-field="worker_id">{{ run.worker_id or '—' }}</td>
               <td data-field="message">{{ run.message or '—' }}</td>
             </tr>
-          {% else %}<tr><td colspan="5" class="empty-state">No processing runs yet.</td></tr>{% endfor %}
+          {% else %}<tr><td colspan="7" class="empty-state">No processing runs yet.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>

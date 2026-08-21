@@ -44,8 +44,13 @@
         {% for game in games %}
           <tr>
             <td>
-              <a class="table-title" href="/games/{{ game.id }}">{{ game.title }}</a>
-              {% if game.release_date %}<span class="table-subtitle">{{ game.release_date }}</span>{% endif %}
+              <div class="title-cell">
+                {% if game.cover_image_url %}<img class="cover" src="{{ game.cover_image_url }}" alt="" loading="lazy">{% endif %}
+                <div>
+                  <a class="table-title" href="/games/{{ game.id }}">{{ game.title }}</a>
+                  {% if game.release_date %}<span class="table-subtitle">{{ game.release_date }}</span>{% endif %}
+                </div>
+              </div>
             </td>
             <td>
               <div class="inline-list">

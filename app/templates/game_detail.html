@@ -3,14 +3,22 @@
 {% block content %}
   <a class="back-link" href="/games">Back to games</a>
   <div class="page-heading detail-heading">
-    <div>
-      <h1>{{ game.title }}</h1>
-      <p class="muted">
-        {% if game.release_date %}Released {{ game.release_date }} · {% endif %}
-        Updated {{ game.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC
-      </p>
+    <div class="detail-identity">
+      {% if game.cover_image_url %}<img class="cover cover-large" src="{{ game.cover_image_url }}" alt="{{ game.title }} cover" loading="lazy">{% endif %}
+      <div>
+        <h1>{{ game.title }}</h1>
+        <p class="muted">
+          {% if game.release_date %}Released {{ game.release_date }} · {% endif %}
+          {% if game.developer %}{{ game.developer }} · {% endif %}
+          Updated {{ game.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC
+        </p>
+        {% if game.genres %}<div class="inline-list">{% for genre in game.genres %}<span class="chip">{{ genre.name }}</span>{% endfor %}</div>{% endif %}
+      </div>
     </div>
-    {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Open source</a>{% endif %}
+    <div class="detail-actions">
+      {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Open source</a>{% endif %}
+      {% if game.video_url %}<a class="button button-quiet" href="{{ game.video_url }}" rel="noreferrer">Watch video</a>{% endif %}
+    </div>
   </div>
 
   {% if game.description %}<p class="lead">{{ game.description }}</p>{% endif %}
@@ -31,6 +39,29 @@
 
   <div class="two-column">
     <section class="section">
+      <h2>Critic reviews <span class="muted">({{ critic_review_count }} collected)</span></h2>
+      {% for item in critic_reviews %}
+        <article class="text-block">
+          <h3>{{ item.publication or item.author or 'Critic' }}{% if item.score is not none %} · {{ item.score|int }}{% endif %}</h3>
+          <p>{{ item.quote }}</p>
+          <span class="muted">{{ item.platform.name if item.platform else 'All platforms' }}{% if item.review_date %} · {{ item.review_date }}{% endif %}</span>
+        </article>
+      {% else %}<p class="empty-copy">No critic reviews collected yet.</p>{% endfor %}
+    </section>
+    <section class="section">
+      <h2>User reviews <span class="muted">({{ user_review_count }} collected)</span></h2>
+      {% for item in user_reviews %}
+        <article class="text-block">
+          <h3>{{ item.author or 'User' }}{% if item.score is not none %} · {{ item.score }}{% endif %}</h3>
+          <p>{{ item.quote }}</p>
+          <span class="muted">{{ item.platform.name if item.platform else 'All platforms' }}{% if item.review_date %} · {{ item.review_date }}{% endif %}</span>
+        </article>
+      {% else %}<p class="empty-copy">No user reviews collected yet.</p>{% endfor %}
+    </section>
+  </div>
+
+  <div class="two-column">
+    <section class="section">
       <h2>Review summaries</h2>
       {% for item in game.review_summaries %}
         <article class="text-block"><h3>{{ item.audience.value | title }}</h3><p>{{ item.summary }}</p><span class="muted">Based on {{ item.source_count }} sources</span></article>
@@ -44,4 +75,3 @@
     </section>
   </div>
 {% endblock %}
-
