@@ -62,20 +62,76 @@ Web and worker share configuration and models but no process memory.
 - A PostgreSQL partial unique index allows only one `processing_runs.status = RUNNING` row. Keep
   job claiming transactional and do not weaken this invariant when adding schedulers.
 - `game_reviews` stores collected critic and user reviews verbatim, keyed by
-  `(game_id, external_key)`, as the input for the not-yet-connected AI summaries. `ReviewSummary`
-  stays empty until Gemini is wired in.
+  `(game_id, external_key)`. It is the only input the review summaries are allowed to use.
+
+## Gemini enrichment
+
+- `app/collectors/gemini.py` uses the official `google-genai` SDK. Every call is constrained by a
+  pydantic `response_schema` and the reply is re-validated locally, so no caller ever parses free
+  text. `GEMINI_API_KEY` is environment-only and must never become a `/settings` value.
+- The schema is chosen from the audiences that actually have reviews (critics only, users only,
+  or both), which is what keeps the two apart and stops the model from inventing the missing one.
+  Below `ai.min_reviews` an audience is left empty; "no data" is a state, never a generated
+  paragraph, and a game's description is never turned into an opinion.
+- Errors are split by what the caller should do: `GeminiUnavailable` (bad key, no access, unknown
+  model) disables Gemini for the rest of the run, `GeminiTemporaryError` (quota, 5xx) skips one
+  game and lets the next try, `GeminiInvalidResponse` retries then reports. Nothing propagates
+  into the crawl: a run whose collection succeeded stays SUCCEEDED.
+- Free keys allow about **5 requests per minute** on `gemini-*-flash` but far more on
+  `gemma-4-31b-it`, which is why Gemma is the default for an hourly crawler; its output quality
+  was comparable in side-by-side checks. `GEMINI_REQUESTS_PER_MINUTE` paces calls, and a 429 with
+  a `retryDelay` is honoured instead of guessed. Change `ai.model` from `/settings` on a paid key.
+- `PROMPT_VERSION` in the collector is part of `review_summaries.input_digest`
+  (`"<version>:<sha256 of review keys>"`). Bumping it after a prompt change makes every stored
+  summary stale and regenerates it on the next run — do that instead of editing rows by hand.
+- Refresh policy (`summary_needs_refresh`): generate when there is no summary; regenerate only
+  when the review set grew by at least `ai.refresh_min_new_reviews` **and** by at least
+  `ai.refresh_min_growth` relative to the previous count, and not within
+  `ai.min_refresh_interval_hours`. Tags are regenerated only when the description or the hard
+  metadata behind them changes (`Game.ai_tags_digest`). An unchanged hourly pass therefore costs
+  zero model calls.
+- Tunables live in `app/services/app_settings.py`: environment default, optional database
+  override editable from `/settings`, no restart needed. Add new knobs there rather than reading
+  `settings.*` directly in the worker.
+
+## Similar games
+
+- `app/services/similarity.py` is plain weighted arithmetic — no embeddings, no similarity SQL.
+  Feature sets are compared with `|A∩B| / sqrt(|A|·|B|)`, which does not punish a richly tagged
+  game for having extra tags the way Jaccard does.
+- A component counts only when both games have it, and the comparable weights form the
+  denominator, so missing data is not scored as difference. The result is then multiplied by
+  `sqrt(share of weight compared)`: without that a barely-known game sharing one genre outscored
+  a genuinely similar game with a full feature set. `Comparison` keeps `raw`, `confidence` and
+  `score` separate so both rules stay testable.
+- Weights (relative, not percentages): mechanics .28, genres .16, setting .12, structure .10,
+  style .10, Metacritic peer listing .08, descriptors .06, developer .06, mood .05, score .04,
+  ESRB .03, publisher .02, platforms .02, release year .02.
+- Tags come from a controlled vocabulary in the collector (`FACET_VOCABULARY`) plus up to five
+  free `descriptors`. A fixed vocabulary is what makes tags comparable between games; values
+  outside it are dropped rather than stored.
+- Two extra signals are taken from the game page the crawler already fetches: the ESRB rating,
+  and `related_slugs` from Metacritic's own genre-peer carousel. Both are sparse, which the
+  available-weight rule handles.
+- `lead_platform()` — most critic reviews, then highest Metascore — defines the one score that
+  represents a game. The catalogue list, its sorting, the similarity score band and the Gemini
+  context all use it, so the number a user sees is the number everything else reasons about.
+  Unrated games show "not rated" and sort last; never substitute 0.
 
 ## Testing
 
-Tests never touch the live site. `tests/fixtures/metacritic/` holds trimmed captures of real
-pages: the genuine `__NUXT_DATA__` payload with unrelated components removed, verified to parse
-identically to the page it came from. `tests/conftest.py` pins collection settings through
-environment variables so a local `.env` cannot change test outcomes.
+Tests never touch the live site or Gemini. `tests/fixtures/metacritic/` holds trimmed captures of
+real pages: the genuine `__NUXT_DATA__` payload with unrelated components removed, verified to
+parse identically to the page it came from. Gemini is exercised through a fake SDK object
+(`tests/test_gemini_client.py`) and a stub client (`tests/conftest.py`). `tests/conftest.py` pins
+collection and AI settings through environment variables, so a developer's `.env` — which does
+hold a real key — cannot change test outcomes or trigger a live call.
 
 ## Current state and next work
 
-Auth, game browsing/detail pages, activity queue with SSE progress, settings, health, worker
-heartbeat, Compose, CI, and the full Metacritic pipeline (discovery, per-platform scores, review
-collection, hourly schedule, restart recovery) are in place. Next work is Gemini review
-summarization over `game_reviews`, YouTube analysis, and final product design. Add each
-integration behind service-layer boundaries and record raw provider identifiers for idempotency.
+Auth, catalogue and detail pages, activity queue with SSE progress, settings, health, worker
+heartbeat, Compose, CI, the Metacritic pipeline (discovery, per-platform scores, review
+collection, hourly schedule, restart recovery) and Gemini enrichment (per-audience summaries,
+similarity tags, weighted similar games) are in place. Next work is YouTube analysis and the
+final product design. `YouTubeAnalysis` is still empty. Add each integration behind service-layer
+boundaries and record raw provider identifiers for idempotency.
