@@ -8,13 +8,15 @@ an empty success.
 """
 
 import logging
+import uuid
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
 from app.collectors.metacritic import MetacriticClient
 from app.config import settings
-from app.models import CrawlStatus, ProcessingRun, RunStatus
+from app.models import CrawlStatus, Game, GamePlatform, ProcessingRun, RunStatus
 from app.services.crawl import (
     finish_state,
     get_or_create_state,
@@ -23,11 +25,13 @@ from app.services.crawl import (
     plan_next_batch,
     start_state,
 )
+from app.services.enrichment import EnrichmentSession, GameEnrichment
 from app.services.games import apply_game_snapshot
 from app.time import utc_now
 
 logger = logging.getLogger("gamerate.pipeline")
 MAX_TRACKED_ERRORS = 20
+MAX_TRACKED_AI_GAMES = 30
 
 
 def _touch(db: Session, run: ProcessingRun, message: str | None = None, **fields: Any) -> None:
@@ -79,6 +83,7 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
 
     succeeded = 0
     errors: list[dict[str, str]] = []
+    collected_ids: list[uuid.UUID] = []
 
     for index, slug in enumerate(plan.slugs, start=1):
         _touch(db, run, f"Collecting {slug} ({index}/{len(plan.slugs)})")
@@ -99,6 +104,7 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
                 },
             )
             succeeded += 1
+            collected_ids.append(game.id)
             _touch(
                 db,
                 run,
@@ -120,6 +126,8 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
                 current_game_id=None,
             )
 
+    ai_details = enrich_collected_games(db, run, collected_ids, offset=len(plan.slugs))
+
     # A fresh dict, because SQLAlchemy tracks JSON columns by identity, not by content.
     details = {
         **details,
@@ -127,8 +135,10 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
         "failed": len(errors),
         "errors": errors[:MAX_TRACKED_ERRORS],
         "next_cursor": plan.next_cursor,
+        "ai": ai_details,
     }
 
+    ai_note = _ai_note(ai_details)
     if not plan.slugs:
         status = RunStatus.SUCCEEDED
         message = "No unprocessed games left for today"
@@ -141,6 +151,7 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
     else:
         status = RunStatus.SUCCEEDED
         message = f"Processed {succeeded} games"
+    message = f"{message}{ai_note}"
 
     finish_state(
         db,
@@ -166,6 +177,110 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
         len(errors),
     )
     return run
+
+
+def enrich_collected_games(
+    db: Session,
+    run: ProcessingRun,
+    game_ids: list[uuid.UUID],
+    *,
+    offset: int,
+    session: EnrichmentSession | None = None,
+) -> dict[str, Any]:
+    """Second phase of a run: ask Gemini about the games this run just collected.
+
+    Enrichment is best-effort by design. A game that fails is recorded and the next game is
+    still attempted; only a credential-level failure stops the phase, because repeating that
+    request cannot succeed. Nothing here can fail the crawl that already completed.
+    """
+    session = session or EnrichmentSession(db)
+    summary: dict[str, Any] = {
+        "enabled": session.enabled,
+        "model": session.model,
+        "planned": 0,
+        "generated": 0,
+        "failed": 0,
+        "skipped": 0,
+        "calls": 0,
+        "games": [],
+    }
+    if not session.enabled:
+        summary["disabled_reason"] = session.disabled_reason
+        return summary
+    if not game_ids:
+        return summary
+
+    targets = game_ids[: max(session.max_games, 0)]
+    summary["planned"] = len(targets)
+    if not targets:
+        return summary
+
+    _touch(
+        db,
+        run,
+        f"Analyzing reviews for {len(targets)} games",
+        progress_total=offset + len(targets),
+    )
+
+    for index, game_id in enumerate(targets, start=1):
+        game = db.scalar(
+            select(Game)
+            .where(Game.id == game_id)
+            .options(
+                selectinload(Game.genres),
+                selectinload(Game.tags),
+                selectinload(Game.platforms).selectinload(GamePlatform.platform),
+            )
+        )
+        if game is None:
+            continue
+        _touch(
+            db,
+            run,
+            f"Analyzing {game.title} ({index}/{len(targets)})",
+            current_game_id=game.id,
+        )
+        try:
+            outcome = session.enrich_game(db, game)
+            db.commit()
+        except Exception as exc:  # enrichment must never fail a completed crawl
+            db.rollback()
+            logger.exception("enrichment crashed for game=%s run=%s", game_id, run.id)
+            outcome = GameEnrichment(title=game.title, error=f"{type(exc).__name__}: {exc}"[:500])
+
+        if outcome.error:
+            summary["failed"] += 1
+        elif outcome.called_model:
+            summary["generated"] += 1
+        else:
+            summary["skipped"] += 1
+        if len(summary["games"]) < MAX_TRACKED_AI_GAMES:
+            summary["games"].append(outcome.as_details())
+
+        _touch(db, run, run.message, progress_current=offset + index, current_game_id=None)
+
+        if session.disabled_reason:
+            summary["disabled_reason"] = session.disabled_reason
+            summary["skipped"] += len(targets) - index
+            logger.warning("stopping enrichment for run=%s: %s", run.id, session.disabled_reason)
+            break
+
+    summary["calls"] = session.calls
+    return summary
+
+
+def _ai_note(ai_details: dict[str, Any]) -> str:
+    if not ai_details.get("enabled"):
+        return ""
+    parts = []
+    if ai_details.get("generated"):
+        parts.append(f"{ai_details['generated']} enriched")
+    if ai_details.get("failed"):
+        failed = ai_details["failed"]
+        parts.append(f"{failed} AI failure{'' if failed == 1 else 's'}")
+    if ai_details.get("disabled_reason"):
+        parts.append("AI stopped")
+    return f" · AI: {', '.join(parts)}" if parts else ""
 
 
 def build_client() -> MetacriticClient:
