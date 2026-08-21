@@ -1,0 +1,1 @@
+"""GameRate application package."""
