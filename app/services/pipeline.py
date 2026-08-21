@@ -11,7 +11,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.collectors.metacritic import MetacriticClient
@@ -333,12 +333,25 @@ def enrich_youtube_games(
             .order_by(Game.last_discovered_at.desc())
         ).unique()
     )
-    by_id = {game.id: game for game in games}
-    prioritized = [by_id[game_id] for game_id in collected_ids if game_id in by_id]
-    prioritized.extend(game for game in games if game.id not in set(collected_ids))
-    targets = [game for game in prioritized if youtube_needs_work(game.youtube_analysis)][
-        : max(session.max_games, 0)
-    ]
+    # Reviewed games first. A catalogue of fresh indie releases would otherwise spend the
+    # whole per-run budget on titles nobody has published a let's-play of, while the games
+    # a reader is actually likely to look up wait behind them. It is a sort, not a filter:
+    # an unreviewed game still comes up once the reviewed backlog is clear.
+    review_counts = dict(
+        db.execute(
+            select(
+                GamePlatform.game_id,
+                func.coalesce(func.max(GamePlatform.critic_review_count), 0),
+            ).group_by(GamePlatform.game_id)
+        ).all()
+    )
+    collected = set(collected_ids)
+    targets = sorted(
+        (game for game in games if youtube_needs_work(game.youtube_analysis)),
+        # `games` already arrives newest-first and Python's sort is stable, so recency
+        # remains the tie-breaker under both keys.
+        key=lambda game: (-(review_counts.get(game.id) or 0), game.id not in collected),
+    )[: max(session.max_games, 0)]
     summary["planned"] = len(targets)
     if not targets:
         session.close()

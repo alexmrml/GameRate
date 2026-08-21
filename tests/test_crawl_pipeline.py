@@ -24,6 +24,7 @@ from app.models import (
 from app.services import crawl, pipeline
 from app.services.crawl import STAGE_BROWSE, STAGE_NEW_RELEASES
 from app.services.enrichment import EnrichmentSession
+from app.services.games import apply_game_snapshot
 from app.services.pipeline import execute_run
 from app.services.runs import enqueue_manual_run, enqueue_scheduled_run
 from app.services.youtube import YouTubeEnrichmentSession
@@ -402,3 +403,31 @@ def test_youtube_failures_do_not_change_the_crawl_or_review_enrichment_result(
     assert "YouTube: 2 failed" in result["message"]
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 4
+
+
+def test_reviewed_games_take_the_youtube_budget_before_unreviewed_indies(
+    frozen_day: DayClock,
+) -> None:
+    """A catalogue of fresh indies would otherwise spend every run on titles with no videos."""
+    from tests.test_youtube_enrichment import FakeGemini, FakeTranscripts, FakeYouTube
+
+    with SessionLocal() as db:
+        # Stored newest-first the other way round, so recency alone would pick the indie.
+        apply_game_snapshot(db, build_snapshot("reviewed-game", reviews=12))
+        apply_game_snapshot(db, build_snapshot("indie-game", reviews=0))
+        db.commit()
+        run = enqueue_manual_run(db, None)
+        run.status = RunStatus.RUNNING
+        db.commit()
+
+        session = YouTubeEnrichmentSession(
+            db,
+            youtube_client=FakeYouTube([]),
+            transcript_client=FakeTranscripts(),
+            gemini_client=FakeGemini(),
+            video_gemini_client=FakeGemini(),
+        )
+        session.max_games = 1
+        details = pipeline.enrich_youtube_games(db, run, [], offset=0, session=session)
+
+    assert [item["title"] for item in details["games"]] == ["Reviewed Game"]
