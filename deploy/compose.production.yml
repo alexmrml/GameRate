@@ -1,0 +1,111 @@
+name: gamerate
+
+x-app-environment: &app-environment
+  APP_ENV: production
+  APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Istanbul}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:?set POSTGRES_DB}
+  SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-gamerate_session}
+  COOKIE_SECURE: "true"
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+  WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1}
+  WORKER_STALE_SECONDS: ${WORKER_STALE_SECONDS:-30}
+  RUN_STALE_SECONDS: ${RUN_STALE_SECONDS:-900}
+  SCHEDULE_INTERVAL_MINUTES: ${SCHEDULE_INTERVAL_MINUTES:-60}
+  CRAWL_BATCH_SIZE: ${CRAWL_BATCH_SIZE:-20}
+  CRAWL_REQUEST_DELAY_SECONDS: ${CRAWL_REQUEST_DELAY_SECONDS:-0.6}
+  CRAWL_CRITIC_REVIEW_PAGES: ${CRAWL_CRITIC_REVIEW_PAGES:-2}
+  CRAWL_USER_REVIEWS_PER_PLATFORM: ${CRAWL_USER_REVIEWS_PER_PLATFORM:-25}
+  CRAWL_MAX_PLATFORMS: ${CRAWL_MAX_PLATFORMS:-8}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemma-4-31b-it}
+  GEMINI_REQUESTS_PER_MINUTE: ${GEMINI_REQUESTS_PER_MINUTE:-25}
+  GEMINI_RETRY_DELAY_SECONDS: ${GEMINI_RETRY_DELAY_SECONDS:-30}
+  AI_ENABLED: ${AI_ENABLED:-true}
+  AI_MIN_REVIEWS: ${AI_MIN_REVIEWS:-3}
+  AI_MAX_GAMES_PER_RUN: ${AI_MAX_GAMES_PER_RUN:-20}
+  AI_REFRESH_MIN_NEW_REVIEWS: ${AI_REFRESH_MIN_NEW_REVIEWS:-5}
+  AI_REFRESH_MIN_GROWTH: ${AI_REFRESH_MIN_GROWTH:-0.25}
+  AI_MIN_REFRESH_INTERVAL_HOURS: ${AI_MIN_REFRESH_INTERVAL_HOURS:-12}
+  GOOGLE_CLOUD_API_KEY: ${GOOGLE_CLOUD_API_KEY:-}
+  YOUTUBE_ANALYSIS_ENABLED: ${YOUTUBE_ANALYSIS_ENABLED:-true}
+  YOUTUBE_ANALYSIS_MODEL: ${YOUTUBE_ANALYSIS_MODEL:-gemma-4-31b-it}
+  YOUTUBE_VIDEO_FALLBACK_MODEL: ${YOUTUBE_VIDEO_FALLBACK_MODEL:-gemini-3.5-flash}
+  YOUTUBE_ANALYSIS_FRAGMENT_MINUTES: ${YOUTUBE_ANALYSIS_FRAGMENT_MINUTES:-15}
+  YOUTUBE_TRANSCRIPT_MIN_WORDS_PER_MINUTE: ${YOUTUBE_TRANSCRIPT_MIN_WORDS_PER_MINUTE:-15}
+  YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN: ${YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN:-5}
+  YOUTUBE_MAX_VIDEO_FALLBACKS_PER_RUN: ${YOUTUBE_MAX_VIDEO_FALLBACKS_PER_RUN:-1}
+  YOUTUBE_SEARCH_MAX_RESULTS: ${YOUTUBE_SEARCH_MAX_RESULTS:-50}
+  YOUTUBE_RETRY_INTERVAL_HOURS: ${YOUTUBE_RETRY_INTERVAL_HOURS:-24}
+  YOUTUBE_NO_RESULT_REFRESH_DAYS: ${YOUTUBE_NO_RESULT_REFRESH_DAYS:-30}
+
+x-app-service: &app-service
+  image: ${APP_IMAGE:?APP_IMAGE must be an immutable GHCR digest}
+  environment: *app-environment
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    restart: unless-stopped
+
+  web:
+    <<: *app-service
+    command:
+      - sh
+      - -c
+      - >-
+        alembic upgrade head &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+        --proxy-headers --forwarded-allow-ips=*
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    <<: *app-service
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-environment
+      WORKER_ID: ${WORKER_ID:-worker-1}
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

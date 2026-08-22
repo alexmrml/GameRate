@@ -17,6 +17,12 @@ history. Run lint and tests locally with `pip install -e ".[dev]"`, `ruff check 
 Outside Compose, start the two processes independently with `uvicorn app.main:app` and
 `python -m app.worker`; both read the same environment configuration and PostgreSQL database.
 
+## Production deployment
+
+The Ubuntu 24.04, rootless Docker, zrok and GitHub Actions deployment procedure is documented in
+[`deploy/README.md`](deploy/README.md). Production uses a separate Compose file; the local
+development workflow above is unchanged.
+
 ## Metacritic crawler
 
 The worker collects games from Metacritic over plain HTTP. Each calendar day is one cycle:

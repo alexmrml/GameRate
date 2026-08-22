@@ -1,4 +1,6 @@
 .env
+deploy/.env
+deploy/.image.env
 .venv/
 __pycache__/
 *.py[cod]

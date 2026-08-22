@@ -1,0 +1,116 @@
+name: Production
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: image
+        name: Set image name
+        shell: bash
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >>"${GITHUB_OUTPUT}"
+      - id: build
+        name: Build and publish immutable image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.image.outputs.image }}:sha-${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PROD_PUBLIC_URL }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      PROD_HOST: ${{ secrets.PROD_HOST }}
+      PROD_PORT: ${{ vars.PROD_SSH_PORT || '22' }}
+      PROD_USER: ${{ vars.PROD_SSH_USER || 'gamerate-deploy' }}
+      PROD_PUBLIC_URL: ${{ vars.PROD_PUBLIC_URL }}
+      PROD_KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+      SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+      GHCR_TOKEN: ${{ github.token }}
+      GHCR_USER: ${{ github.actor }}
+      IMAGE_REF: ${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Configure SSH
+        shell: bash
+        run: |
+          test -n "${PROD_HOST}"
+          test -n "${PROD_KNOWN_HOSTS}"
+          test -n "${SSH_PRIVATE_KEY}"
+          install -m 700 -d "${HOME}/.ssh"
+          printf '%s\n' "${PROD_KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" >"${HOME}/.ssh/gamerate_deploy"
+          chmod 600 "${HOME}/.ssh/known_hosts" "${HOME}/.ssh/gamerate_deploy"
+      - name: Upload deployment files
+        shell: bash
+        run: |
+          ssh -i "${HOME}/.ssh/gamerate_deploy" -p "${PROD_PORT}" \
+            "${PROD_USER}@${PROD_HOST}" 'install -d -m 700 "$HOME/gamerate/deploy"'
+          scp -i "${HOME}/.ssh/gamerate_deploy" -P "${PROD_PORT}" \
+            deploy/compose.production.yml deploy/deploy.sh \
+            "${PROD_USER}@${PROD_HOST}:gamerate/deploy/"
+      - name: Pull and deploy exact image digest
+        shell: bash
+        run: |
+          printf '%s' "${GHCR_TOKEN}" | \
+            ssh -i "${HOME}/.ssh/gamerate_deploy" -p "${PROD_PORT}" \
+              "${PROD_USER}@${PROD_HOST}" \
+              "docker login ghcr.io --username '${GHCR_USER}' --password-stdin"
+          ssh -i "${HOME}/.ssh/gamerate_deploy" -p "${PROD_PORT}" \
+            "${PROD_USER}@${PROD_HOST}" \
+            "chmod 700 ~/gamerate/deploy/deploy.sh && ~/gamerate/deploy/deploy.sh '${IMAGE_REF}'"
+      - name: Check public zrok endpoint
+        shell: bash
+        run: |
+          test -n "${PROD_PUBLIC_URL}"
+          curl --fail --show-error --silent \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            -H 'skip_zrok_interstitial: true' \
+            "${PROD_PUBLIC_URL%/}/health"
+      - name: Remove temporary registry credential
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ssh -i "${HOME}/.ssh/gamerate_deploy" -p "${PROD_PORT}" \
+            "${PROD_USER}@${PROD_HOST}" 'docker logout ghcr.io'
