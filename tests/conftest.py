@@ -40,6 +40,7 @@ os.environ["YOUTUBE_MAX_VIDEO_FALLBACKS_PER_RUN"] = "1"
 os.environ["YOUTUBE_SEARCH_MAX_RESULTS"] = "50"
 os.environ["YOUTUBE_RETRY_INTERVAL_HOURS"] = "24"
 os.environ["YOUTUBE_NO_RESULT_REFRESH_DAYS"] = "30"
+os.environ["YOUTUBE_PROXIES"] = ""
 
 from app.collectors.gemini import (  # noqa: E402
     AudienceResult,

@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.youtube_proxies import parse_proxy_list
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -79,6 +81,9 @@ class Settings(BaseSettings):
     youtube_search_max_results: int = Field(default=50, ge=5, le=100)
     youtube_retry_interval_hours: int = Field(default=24, ge=1)
     youtube_no_result_refresh_days: int = Field(default=30, ge=1)
+    # Comma- or newline-separated URLs. Credentials remain environment-owned unless an
+    # administrator explicitly adds a proxy through the authenticated settings page.
+    youtube_proxies: str = ""
 
     @field_validator("app_timezone")
     @classmethod
@@ -87,6 +92,12 @@ class Settings(BaseSettings):
             ZoneInfo(value)
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Unknown IANA timezone: {value}") from exc
+        return value
+
+    @field_validator("youtube_proxies")
+    @classmethod
+    def validate_youtube_proxies(cls, value: str) -> str:
+        parse_proxy_list(value)
         return value
 
 

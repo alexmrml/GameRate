@@ -438,7 +438,7 @@ def test_youtube_failures_do_not_change_the_crawl_or_review_enrichment_result(
     frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FailingYouTube:
-        def search_game(self, _title: str):
+        def search_game(self, _title: str, *, proxy: str | None = None):
             raise YouTubeTemporaryError("503 YouTube unavailable")
 
         def close(self) -> None:

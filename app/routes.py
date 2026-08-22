@@ -34,11 +34,19 @@ from app.models import (
     WorkerHeartbeat,
 )
 from app.security import verify_password
-from app.services.app_settings import TUNABLES_BY_KEY, describe_settings, parse_setting_value
+from app.services.app_settings import (
+    TUNABLES_BY_KEY,
+    add_youtube_proxy,
+    describe_settings,
+    describe_youtube_proxies,
+    parse_setting_value,
+    remove_youtube_proxy,
+)
 from app.services.runs import enqueue_manual_run
 from app.services.similarity import lead_platform, rank_similar
 from app.templates import format_run_message, templates
 from app.time import utc_now
+from app.youtube_proxies import InvalidYouTubeProxy
 
 router = APIRouter()
 ENVIRONMENT_ONLY_SETTING_KEYS = {"GEMINI_API_KEY", "GOOGLE_CLOUD_API_KEY"}
@@ -376,7 +384,9 @@ def settings_page(
             request,
             auth,
             tunables=describe_settings(db),
+            youtube_proxies=describe_youtube_proxies(db),
             saved=request.query_params.get("saved") == "1",
+            proxy_status=request.query_params.get("proxy"),
         ),
     )
 
@@ -413,3 +423,37 @@ def update_setting(
     row.updated_by_id = auth.user.id
     db.commit()
     return RedirectResponse("/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/settings/youtube-proxies")
+def add_proxy_setting(
+    proxy_url: Annotated[str, Form()],
+    csrf_token: Annotated[str, Form()],
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_csrf(csrf_token, auth)
+    try:
+        added = add_youtube_proxy(db, proxy_url, user_id=auth.user.id)
+    except InvalidYouTubeProxy:
+        result = "invalid"
+    else:
+        result = "added" if added else "duplicate"
+    return RedirectResponse(
+        f"/settings?proxy={result}#youtube-proxies", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.post("/settings/youtube-proxies/{proxy_index}/delete")
+def delete_proxy_setting(
+    proxy_index: int,
+    csrf_token: Annotated[str, Form()],
+    auth: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_csrf(csrf_token, auth)
+    removed = remove_youtube_proxy(db, proxy_index, user_id=auth.user.id)
+    result = "removed" if removed else "missing"
+    return RedirectResponse(
+        f"/settings?proxy={result}#youtube-proxies", status_code=status.HTTP_303_SEE_OTHER
+    )

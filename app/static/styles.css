@@ -223,6 +223,19 @@ tbody tr:hover { background: #f8faf7; }
 .input-with-unit { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .input-with-unit input { border-radius: var(--radius) 0 0 var(--radius); }
 .input-with-unit span { min-height: 40px; display: flex; align-items: center; padding: 0 10px; border: 1px solid var(--border-strong); border-left: 0; background: var(--surface); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.proxy-settings { margin-top: 28px; padding: 22px 24px; border: 1px solid var(--border-strong); background: var(--surface); }
+.proxy-settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.proxy-settings-heading h3 { margin-bottom: 4px; font-size: 17px; }
+.proxy-settings-heading p, .proxy-add-form label span { margin: 0; color: var(--muted); font-size: 12px; font-weight: 400; letter-spacing: normal; line-height: 1.45; text-transform: none; }
+.proxy-count { flex: 0 0 auto; color: var(--accent-dark); font-size: 11px; font-weight: 700; }
+.proxy-add-form { display: grid; grid-template-columns: minmax(250px, 1fr) 330px 96px; align-items: end; gap: 20px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
+.proxy-add-form label strong, .proxy-add-form label span { display: block; }
+.proxy-add-form label strong { margin-bottom: 3px; font-size: 13px; }
+.proxy-list { margin: 20px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
+.proxy-list li { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 58px; border-bottom: 1px solid var(--border); }
+.proxy-list small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.proxy-mask { font-size: 12px; }
+.proxy-empty { margin: 18px 0 0; color: var(--muted); font-size: 12px; }
 .system-note { margin-top: 30px; padding: 18px 20px; border-left: 3px solid var(--border-strong); background: var(--surface); }
 .system-note strong { color: var(--ink); font-size: 13px; }
 .system-note p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
@@ -281,6 +294,11 @@ tbody tr:hover { background: #f8faf7; }
   .setting-row { grid-template-columns: 1fr; gap: 10px; padding: 18px 0; }
   .setting-control { width: 100%; }
   .setting-row .button { width: 100%; }
+  .proxy-settings { padding: 18px; }
+  .proxy-settings-heading { display: block; }
+  .proxy-count { display: block; margin-top: 8px; }
+  .proxy-add-form { grid-template-columns: 1fr; gap: 10px; }
+  .proxy-add-form .button { width: 100%; }
   .settings-group-heading { grid-template-columns: 36px 1fr; }
   .section { margin-top: 42px; }
   .section-heading { flex-direction: column; gap: 7px; }

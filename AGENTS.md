@@ -199,15 +199,15 @@ Web and worker share configuration and models but no process memory.
   is exactly what a let's-play looks like.
 - **The main path is subtitles, not video.** `app/collectors/transcript.py` uses yt-dlp with
   `download=False` to read the player response, then fetches the `json3` timed-text track
-  over plain HTTP. No video or audio stream is ever downloaded and no temporary file is
+  through `YoutubeDL.urlopen`. No video or audio stream is ever downloaded and no temporary file is
   written. Sending the video to Gemini was quota-bound to roughly one game per run; reading
   captions costs about 5 seconds and one ordinary text call, which is why the per-run cap is
   now 5 games and the one-game limit survives only on the fallback.
-- Do not assume yt-dlp's network layer avoids timed-text rate limits. On 2026-08-22 four saved
-  429 cases were retried with fresh track URLs in alternating order: direct `httpx` and
-  `YoutubeDL.urlopen` both returned 429 for all four. Keep the smaller direct fetch unless a new
-  measurement shows a real transport difference; switching APIs alone does not solve an IP-side
-  YouTube rate limit.
+- yt-dlp search, player metadata and timed-text downloads share the optional proxy pool. The pool
+  combines `YOUTUBE_PROXIES` with entries added through `/settings`; the latter are stored in the
+  existing `app_settings` JSON row but are never rendered back unmasked. One proxy is selected at
+  random per game and stays fixed across its search and caption attempts. Supported URL schemes
+  include HTTP(S), SOCKS4 and SOCKS5. Do not include proxy URLs in outcomes or log messages.
 - Caption track choice is a correctness rule, not a preference. YouTube publishes machine
   *translations* of the automatic captions under every language code, marked by `tlang=` in
   the URL; a translation of a transcription cannot support a verbatim quote. Only original

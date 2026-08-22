@@ -37,6 +37,11 @@
   </header>
 
   {% if saved %}<div class="notice notice-success" role="status">Настройка сохранена и уже действует.</div>{% endif %}
+  {% if proxy_status == 'added' %}<div class="notice notice-success" role="status">Прокси добавлен в пул.</div>{% endif %}
+  {% if proxy_status == 'removed' %}<div class="notice notice-success" role="status">Прокси удалён из пула.</div>{% endif %}
+  {% if proxy_status == 'duplicate' %}<div class="notice" role="status">Этот прокси уже есть в пуле.</div>{% endif %}
+  {% if proxy_status == 'invalid' %}<div class="notice notice-error" role="alert">Не удалось добавить прокси. Проверьте протокол, адрес и порт.</div>{% endif %}
+  {% if proxy_status == 'missing' %}<div class="notice notice-error" role="alert">Прокси уже был удалён или список изменился.</div>{% endif %}
 
   <div class="settings-container">
     <section class="settings-group">
@@ -56,6 +61,48 @@
       </div>
       <div class="settings-list">
         {% for item in tunables if item.group == 'youtube' %}{{ setting_row(item) }}{% endfor %}
+      </div>
+
+      <div class="proxy-settings" id="youtube-proxies">
+        <div class="proxy-settings-heading">
+          <div>
+            <h3>Прокси для yt-dlp</h3>
+            <p>Для каждой игры случайно выбирается один прокси. Через него выполняются поиск видео и чтение субтитров.</p>
+          </div>
+          <span class="proxy-count">{{ youtube_proxies|length }} в пуле</span>
+        </div>
+
+        <form class="proxy-add-form" method="post" action="/settings/youtube-proxies">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label for="proxy-url">
+            <strong>Добавить прокси</strong>
+            <span>Поддерживаются HTTP, HTTPS, SOCKS4 и SOCKS5. Учётные данные после сохранения больше не показываются.</span>
+          </label>
+          <input id="proxy-url" type="password" name="proxy_url" autocomplete="off"
+                 placeholder="socks5://user:pass@ip:port" required>
+          <button class="button button-small" type="submit">Добавить</button>
+        </form>
+
+        {% if youtube_proxies %}
+          <ul class="proxy-list" aria-label="Прокси для yt-dlp">
+            {% for proxy in youtube_proxies %}
+              <li>
+                <div>
+                  <span class="technical proxy-mask">{{ proxy.masked }}</span>
+                  <small>{% if proxy.source == 'environment' %}из окружения{% else %}добавлен в интерфейсе{% endif %}</small>
+                </div>
+                {% if proxy.delete_index is not none %}
+                  <form method="post" action="/settings/youtube-proxies/{{ proxy.delete_index }}/delete">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="button button-quiet button-small" type="submit">Удалить</button>
+                  </form>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="proxy-empty">Пул пуст — yt-dlp использует прямое соединение.</p>
+        {% endif %}
       </div>
     </section>
 

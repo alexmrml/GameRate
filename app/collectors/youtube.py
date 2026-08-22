@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.youtube_proxies import redact_proxy_from_message
 
 YOUTUBE_BASE_URL = "https://www.googleapis.com/youtube/v3"
 # YouTube's "sort by view count" search filter. The requirement is the most popular video
@@ -396,7 +397,7 @@ class YouTubeClient:
         *,
         api_key: str | None = None,
         client: httpx.Client | None = None,
-        search_ids: Callable[[str, int], list[str]] | None = None,
+        search_ids: Callable[[str, int, str | None], list[str]] | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.google_cloud_api_key
         if not self.api_key:
@@ -413,10 +414,10 @@ class YouTubeClient:
         if self._owns_client:
             self._client.close()
 
-    def search_game(self, title: str) -> YouTubeSearchResult:
+    def search_game(self, title: str, *, proxy: str | None = None) -> YouTubeSearchResult:
         """Search once, then hydrate every result before judging any of it."""
         query = build_search_query(title)
-        video_ids = self._search_ids(query, settings.youtube_search_max_results)
+        video_ids = self._search_ids(query, settings.youtube_search_max_results, proxy)
         if not video_ids:
             return YouTubeSearchResult(query=query, candidates=[])
 
@@ -483,7 +484,7 @@ class YouTubeClient:
         raise YouTubeError(detail)
 
 
-def search_video_ids(query: str, limit: int) -> list[str]:
+def search_video_ids(query: str, limit: int, proxy: str | None = None) -> list[str]:
     """Run one view-count-ordered YouTube search through yt-dlp and return its video ids.
 
     `extract_flat` keeps this to the search page itself: no per-video extraction, no media,
@@ -506,13 +507,17 @@ def search_video_ids(query: str, limit: int) -> list[str]:
         "playlistend": limit,
         "socket_timeout": settings.crawl_request_timeout_seconds,
     }
+    if proxy:
+        options["proxy"] = proxy
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
     except (DownloadError, ExtractorError) as exc:
-        raise YouTubeTemporaryError(f"yt-dlp search failed: {exc}") from exc
+        message = redact_proxy_from_message(str(exc), proxy)
+        raise YouTubeTemporaryError(f"yt-dlp search failed: {message}") from exc
     except Exception as exc:  # an extractor surprise must not reach the crawler
-        raise YouTubeTemporaryError(f"yt-dlp search crashed: {exc}") from exc
+        message = redact_proxy_from_message(str(exc), proxy)
+        raise YouTubeTemporaryError(f"yt-dlp search crashed: {message}") from exc
     entries = (info or {}).get("entries") or []
     return list(
         dict.fromkeys(

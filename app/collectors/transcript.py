@@ -18,9 +18,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from app.config import settings
+from app.youtube_proxies import redact_proxy_from_message
 
 logger = logging.getLogger("gamerate.collectors.transcript")
 
@@ -198,7 +197,7 @@ def select_tail_window(
 
 
 class TranscriptClient:
-    """yt-dlp metadata plus one plain HTTP fetch of the caption track.
+    """yt-dlp metadata plus a yt-dlp network fetch of the caption track.
 
     `download=False` together with `skip_download` keeps this to the player response and
     the timed-text endpoint: no video stream, no audio stream, no temporary files.
@@ -207,8 +206,8 @@ class TranscriptClient:
     def __init__(
         self,
         *,
-        extract_info: Callable[[str], dict[str, Any]] | None = None,
-        fetch_url: Callable[[str], bytes] | None = None,
+        extract_info: Callable[[str, str | None], dict[str, Any]] | None = None,
+        fetch_url: Callable[[str, str | None], bytes] | None = None,
         timeout: float | None = None,
     ) -> None:
         self._timeout = (
@@ -220,10 +219,10 @@ class TranscriptClient:
     def close(self) -> None:  # symmetry with the other collector clients
         return None
 
-    def fetch(self, video_id: str) -> TranscriptTrack:
-        info = self._extract_info(f"https://www.youtube.com/watch?v={video_id}")
+    def fetch(self, video_id: str, *, proxy: str | None = None) -> TranscriptTrack:
+        info = self._extract_info(f"https://www.youtube.com/watch?v={video_id}", proxy)
         url, language, is_automatic = choose_caption_track(info)
-        cues = parse_json3(self._fetch_url(url))
+        cues = parse_json3(self._fetch_url(url, proxy))
         if not cues:
             raise TranscriptUnavailable("The caption track decoded to no speech cues")
         return TranscriptTrack(
@@ -234,7 +233,7 @@ class TranscriptClient:
             cues=cues,
         )
 
-    def _default_extract_info(self, url: str) -> dict[str, Any]:
+    def _default_extract_info(self, url: str, proxy: str | None) -> dict[str, Any]:
         # Imported here so the web process never pays for yt-dlp's import cost.
         import yt_dlp
         from yt_dlp.utils import DownloadError, ExtractorError
@@ -246,30 +245,54 @@ class TranscriptClient:
             "noplaylist": True,
             "socket_timeout": self._timeout,
         }
+        if proxy:
+            options["proxy"] = proxy
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(url, download=False)
         except (DownloadError, ExtractorError) as exc:
-            message = str(exc)
+            message = redact_proxy_from_message(str(exc), proxy)
             if any(marker in message.casefold() for marker in _UNAVAILABLE_MARKERS):
                 raise TranscriptVideoUnavailable(f"yt-dlp could not read {url}: {message}") from exc
             raise TranscriptTemporaryError(f"yt-dlp failed for {url}: {message}") from exc
         except Exception as exc:  # extractor surprises must not reach the crawler
-            raise TranscriptTemporaryError(f"yt-dlp crashed for {url}: {exc}") from exc
+            message = redact_proxy_from_message(str(exc), proxy)
+            raise TranscriptTemporaryError(f"yt-dlp crashed for {url}: {message}") from exc
         if not isinstance(info, dict):
             raise TranscriptTemporaryError(f"yt-dlp returned no metadata for {url}")
         return info
 
-    def _default_fetch_url(self, url: str) -> bytes:
+    def _default_fetch_url(self, url: str, proxy: str | None) -> bytes:
+        import yt_dlp
+
+        options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "socket_timeout": self._timeout,
+        }
+        if proxy:
+            options["proxy"] = proxy
         try:
-            response = httpx.get(url, timeout=self._timeout, follow_redirects=True)
-        except httpx.HTTPError as exc:
-            raise TranscriptTemporaryError(f"Caption download failed: {exc}") from exc
-        if response.status_code == 404:
+            with (
+                yt_dlp.YoutubeDL(options) as downloader,
+                downloader.urlopen(url) as response,
+            ):
+                status_code = getattr(response, "status", None) or response.getcode()
+                payload = response.read()
+        except Exception as exc:
+            message = redact_proxy_from_message(str(exc), proxy)
+            status_code = getattr(exc, "status", None) or getattr(exc, "code", None)
+            if status_code == 404:
+                raise TranscriptUnavailable(
+                    "The caption track URL has expired or was withdrawn"
+                ) from exc
+            raise TranscriptTemporaryError(f"Caption download failed: {message}") from exc
+        if status_code == 404:
             raise TranscriptUnavailable("The caption track URL has expired or was withdrawn")
-        if not response.is_success:
-            raise TranscriptTemporaryError(f"Caption download returned {response.status_code}")
-        return response.content
+        if status_code is not None and not 200 <= status_code < 300:
+            raise TranscriptTemporaryError(f"Caption download returned {status_code}")
+        return payload
 
 
 def _original_tracks(store: Any) -> dict[str, str]:

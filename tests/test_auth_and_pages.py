@@ -108,6 +108,38 @@ def test_settings_page_uses_user_facing_controls(authenticated_client: TestClien
         assert db.get(AppSetting, "ai.min_reviews").value == 4
 
 
+def test_proxy_settings_never_render_the_saved_endpoint_or_credentials(
+    authenticated_client: TestClient,
+) -> None:
+    page = authenticated_client.get("/settings")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert csrf is not None
+    proxy = "socks5://private-user:private-pass@203.0.113.77:1080"
+
+    added = authenticated_client.post(
+        "/settings/youtube-proxies",
+        data={"csrf_token": csrf.group(1), "proxy_url": proxy},
+    )
+    assert added.status_code == 303
+    assert added.headers["location"] == "/settings?proxy=added#youtube-proxies"
+
+    rendered = authenticated_client.get("/settings")
+    assert proxy not in rendered.text
+    assert "private-user" not in rendered.text
+    assert "private-pass" not in rendered.text
+    assert "203.0.113.77" not in rendered.text
+    assert "socks5://***:***@***:***" in rendered.text
+    assert 'type="password"' in rendered.text
+
+    removed = authenticated_client.post(
+        "/settings/youtube-proxies/0/delete",
+        data={"csrf_token": csrf.group(1)},
+    )
+    assert removed.status_code == 303
+    with SessionLocal() as db:
+        assert db.get(AppSetting, "youtube.proxies").value == []
+
+
 def test_activity_messages_are_localized_for_display() -> None:
     assert format_run_message("Waiting for worker") == "Ожидает воркер"
     assert (

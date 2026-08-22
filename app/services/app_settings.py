@@ -2,7 +2,9 @@
 
 Deployment values stay environment-owned, but the knobs that decide how often the worker
 talks to Gemini and YouTube can be retuned from `/settings` without restarting a container.
-Secrets are deliberately absent from this map: provider keys are only read from environment.
+Provider keys are deliberately absent from this map. The yt-dlp proxy pool is the one
+explicit exception: administrators may add individual proxy URLs through a dedicated form
+which never sends their raw value back to the browser.
 """
 
 import logging
@@ -14,8 +16,11 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import AppSetting
+from app.time import utc_now
+from app.youtube_proxies import mask_proxy_url, parse_proxy_list, validate_proxy_url
 
 logger = logging.getLogger("gamerate.settings")
+YOUTUBE_PROXIES_KEY = "youtube.proxies"
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,3 +248,84 @@ def describe_settings(db: Session) -> list[dict[str, Any]]:
             }
         )
     return described
+
+
+def environment_youtube_proxies() -> list[str]:
+    return parse_proxy_list(settings.youtube_proxies)
+
+
+def stored_youtube_proxies(db: Session) -> list[str]:
+    row = db.get(AppSetting, YOUTUBE_PROXIES_KEY)
+    if row is None or row.value is None:
+        return []
+    try:
+        return parse_proxy_list(row.value)
+    except (TypeError, ValueError):
+        logger.warning("setting %s contains an invalid proxy list", YOUTUBE_PROXIES_KEY)
+        return []
+
+
+def effective_youtube_proxies(db: Session) -> list[str]:
+    return list(dict.fromkeys([*environment_youtube_proxies(), *stored_youtube_proxies(db)]))
+
+
+def describe_youtube_proxies(db: Session) -> list[dict[str, Any]]:
+    """Return browser-safe rows; raw proxy URLs must never enter a template context."""
+    environment = environment_youtube_proxies()
+    described = [
+        {"masked": mask_proxy_url(proxy), "source": "environment", "delete_index": None}
+        for proxy in environment
+    ]
+    described.extend(
+        {
+            "masked": mask_proxy_url(proxy),
+            "source": "interface",
+            "delete_index": index,
+        }
+        for index, proxy in enumerate(stored_youtube_proxies(db))
+        if proxy not in environment
+    )
+    return described
+
+
+def add_youtube_proxy(db: Session, value: str, *, user_id: Any) -> bool:
+    """Store one UI-managed proxy and return false when it already exists."""
+    proxy = validate_proxy_url(value)
+    if proxy in effective_youtube_proxies(db):
+        return False
+    proxies = stored_youtube_proxies(db)
+    proxies.append(proxy)
+    row = db.get(AppSetting, YOUTUBE_PROXIES_KEY)
+    now = utc_now()
+    if row is None:
+        db.add(
+            AppSetting(
+                key=YOUTUBE_PROXIES_KEY,
+                value=proxies,
+                description="yt-dlp proxies added through the settings page",
+                updated_by_id=user_id,
+                updated_at=now,
+            )
+        )
+    else:
+        row.value = proxies
+        row.updated_by_id = user_id
+        row.updated_at = now
+    db.commit()
+    return True
+
+
+def remove_youtube_proxy(db: Session, index: int, *, user_id: Any) -> bool:
+    """Remove a UI-managed proxy by its server-side list position."""
+    proxies = stored_youtube_proxies(db)
+    if index < 0 or index >= len(proxies):
+        return False
+    proxies.pop(index)
+    row = db.get(AppSetting, YOUTUBE_PROXIES_KEY)
+    if row is None:
+        return False
+    row.value = proxies
+    row.updated_by_id = user_id
+    row.updated_at = utc_now()
+    db.commit()
+    return True

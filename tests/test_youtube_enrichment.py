@@ -54,10 +54,12 @@ class FakeYouTube:
         self.candidates = list(candidates or [])
         self.error = error
         self.calls: list[str] = []
+        self.proxies: list[str | None] = []
         self.closed = False
 
-    def search_game(self, title: str) -> YouTubeSearchResult:
+    def search_game(self, title: str, *, proxy: str | None = None) -> YouTubeSearchResult:
         self.calls.append(title)
+        self.proxies.append(proxy)
         if self.error:
             raise self.error
         return YouTubeSearchResult(query=f'"{title}" gameplay', candidates=self.candidates)
@@ -73,9 +75,11 @@ class FakeTranscripts:
         self.tracks = dict(tracks or {})
         self.error = error
         self.calls: list[str] = []
+        self.proxies: list[str | None] = []
 
-    def fetch(self, video_id: str) -> TranscriptTrack:
+    def fetch(self, video_id: str, *, proxy: str | None = None) -> TranscriptTrack:
         self.calls.append(video_id)
+        self.proxies.append(proxy)
         if self.error:
             raise self.error
         if video_id not in self.tracks:
@@ -208,6 +212,34 @@ def test_subtitles_are_the_main_path_and_no_video_is_ever_sent() -> None:
     assert row.model_name == "test-transcript-model"
     assert row.analysis_data["prompt_version"] == "5"
     assert row.analysis_data["words_per_minute"] > 0
+
+
+def test_one_selected_proxy_is_reused_for_all_yt_dlp_work_for_a_game() -> None:
+    game = store_game("proxy-routed")
+    proxies = [
+        "socks5://first:secret@192.0.2.1:1080",
+        "https://second:secret@192.0.2.2:8443",
+    ]
+    youtube = FakeYouTube([candidate("proxied")])
+    transcripts = FakeTranscripts({"proxied": spoken_track("proxied")})
+
+    with SessionLocal() as db:
+        session = YouTubeEnrichmentSession(
+            db,
+            youtube_client=youtube,
+            transcript_client=transcripts,
+            gemini_client=FakeGemini(),
+            video_gemini_client=FakeGemini(method="video"),
+            proxies=proxies,
+            proxy_selector=lambda pool: pool[1],
+        )
+        outcome = session.enrich_game(db, db.get(Game, game.id))
+        db.commit()
+
+    assert outcome.status == SUCCESS
+    assert youtube.proxies == [proxies[1]]
+    assert transcripts.proxies == [proxies[1]]
+    assert proxies[1] not in str(outcome.as_details())
 
 
 def test_the_analyzed_transcript_is_the_fetched_one_not_a_model_retelling() -> None:

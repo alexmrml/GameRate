@@ -117,8 +117,8 @@ def test_client_reads_captions_without_touching_any_media() -> None:
     }
 
     client = TranscriptClient(
-        extract_info=lambda url: requested.append(url) or info,
-        fetch_url=lambda url: json3((0, 3, "hello there friend")),
+        extract_info=lambda url, _proxy: requested.append(url) or info,
+        fetch_url=lambda _url, _proxy: json3((0, 3, "hello there friend")),
     )
     track = client.fetch("abc123")
 
@@ -126,6 +126,63 @@ def test_client_reads_captions_without_touching_any_media() -> None:
     assert track.duration_seconds == 600
     assert track.language == "en"
     assert track.is_automatic is True
+    assert track.word_count == 3
+
+
+def test_yt_dlp_fetches_metadata_and_caption_payload_through_the_same_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yt_dlp
+
+    proxy = "socks5://user:pass@127.0.0.1:1080"
+    options_seen: list[dict] = []
+    urls_seen: list[str] = []
+    info = {
+        "duration": 120,
+        "language": "en",
+        "automatic_captions": caption_store("en"),
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self) -> bytes:
+            return json3((0, 2, "proxy routed speech")).encode()
+
+    class Downloader:
+        def __init__(self, options: dict) -> None:
+            options_seen.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def extract_info(self, url: str, *, download: bool) -> dict:
+            assert download is False
+            urls_seen.append(url)
+            return info
+
+        def urlopen(self, url: str) -> Response:
+            urls_seen.append(url)
+            return Response()
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", Downloader)
+
+    track = TranscriptClient().fetch("proxied", proxy=proxy)
+
+    assert [options["proxy"] for options in options_seen] == [proxy, proxy]
+    assert urls_seen == [
+        "https://www.youtube.com/watch?v=proxied",
+        track_url("en"),
+    ]
     assert track.word_count == 3
 
 

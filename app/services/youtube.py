@@ -13,6 +13,8 @@ commentary advances to the next cached candidate without another search.list cal
 
 import logging
 import re
+import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -52,7 +54,7 @@ from app.collectors.youtube import (
 )
 from app.config import settings
 from app.models import Game, YouTubeAnalysis
-from app.services.app_settings import get_setting
+from app.services.app_settings import effective_youtube_proxies, get_setting
 from app.time import as_utc, utc_now
 
 logger = logging.getLogger("gamerate.youtube")
@@ -142,6 +144,8 @@ class YouTubeEnrichmentSession:
         transcript_client: TranscriptClient | Any | None = None,
         gemini_client: GeminiClient | Any | None = None,
         video_gemini_client: GeminiClient | Any | None = None,
+        proxies: list[str] | None = None,
+        proxy_selector: Callable[[list[str]], str] | None = None,
     ) -> None:
         self.enabled = bool(get_setting(db, "youtube.enabled"))
         self.model = str(get_setting(db, "youtube.model"))
@@ -162,6 +166,8 @@ class YouTubeEnrichmentSession:
         self._transcript = transcript_client
         self._gemini = gemini_client
         self._video_gemini = video_gemini_client
+        self.proxies = effective_youtube_proxies(db) if proxies is None else list(proxies)
+        self._proxy_selector = proxy_selector or secrets.choice
 
         missing = []
         if youtube_client is None and not settings.google_cloud_api_key:
@@ -212,6 +218,9 @@ class YouTubeEnrichmentSession:
         if not youtube_needs_work(row):
             outcome.video_id = row.video_id if row else None
             return outcome
+        # Keep one egress identity for the entire game: discovery, candidate retries and
+        # caption download all use the same randomly selected proxy.
+        proxy = self._proxy_selector(self.proxies) if self.proxies else None
         if row is None:
             now = utc_now()
             row = YouTubeAnalysis(game_id=game.id, status=PENDING, created_at=now, updated_at=now)
@@ -220,13 +229,13 @@ class YouTubeEnrichmentSession:
 
         candidate = self._source_for_attempt(row)
         if candidate is None:
-            candidate = self._discover(row, game, outcome)
+            candidate = self._discover(row, game, outcome, proxy=proxy)
             if candidate is None:
                 outcome.status = row.status
                 db.flush()
                 return outcome
 
-        window, fallback_source = self._find_transcript(db, row, candidate, outcome)
+        window, fallback_source = self._find_transcript(db, row, candidate, outcome, proxy=proxy)
         if window is not None:
             self._analyze_transcript(row, game, window, outcome)
         elif fallback_source is not None:
@@ -243,6 +252,8 @@ class YouTubeEnrichmentSession:
         row: YouTubeAnalysis,
         candidate: VideoCandidate,
         outcome: YouTubeOutcome,
+        *,
+        proxy: str | None,
     ) -> tuple[TranscriptWindow | None, VideoCandidate | None]:
         """Walk cached candidates until one publishes usable subtitles.
 
@@ -259,7 +270,7 @@ class YouTubeEnrichmentSession:
             self.transcript_reads += 1
             outcome.transcript_reads += 1
             try:
-                track = client.fetch(candidate.video_id)
+                track = client.fetch(candidate.video_id, proxy=proxy)
                 window = select_tail_window(
                     track,
                     window_seconds=self.fragment_minutes * 60,
@@ -484,7 +495,12 @@ class YouTubeEnrichmentSession:
         return None
 
     def _discover(
-        self, row: YouTubeAnalysis, game: Game, outcome: YouTubeOutcome
+        self,
+        row: YouTubeAnalysis,
+        game: Game,
+        outcome: YouTubeOutcome,
+        *,
+        proxy: str | None,
     ) -> VideoCandidate | None:
         cached = _next_cached_candidate(row)
         if cached is not None:
@@ -498,7 +514,7 @@ class YouTubeEnrichmentSession:
             client = self.youtube_client()
             outcome.search_called = True
             self.search_calls += 1
-            result = client.search_game(game.title)
+            result = client.search_game(game.title, proxy=proxy)
         except YouTubeQuotaExceeded as exc:
             self.youtube_disabled_reason = str(exc)
             self._failure(row, YOUTUBE_QUOTA_EXHAUSTED, str(exc))

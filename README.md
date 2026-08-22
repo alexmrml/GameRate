@@ -116,8 +116,8 @@ immediately; candidates are cached so a silent or unavailable video can advance 
 result without another search.
 
 The analysis itself reads the video's **subtitles**, not the video. yt-dlp reads the player
-metadata and selects the caption track; the signed JSON track is then fetched directly, without
-downloading any video or audio. Machine-translated caption tracks are ignored, so the transcript
+metadata, selects the caption track and fetches its signed JSON through its own network layer,
+without downloading any video or audio. Machine-translated caption tracks are ignored, so the transcript
 is always in the language actually spoken.
 
 Rather than taking a fixed last-15-minutes slice, the app scans backwards from the end and keeps
@@ -140,7 +140,10 @@ tries the next candidate.
 
 YouTube has its own models and failure state, so quota, search, unavailable-video and Gemini
 errors cannot fail Metacritic collection or ordinary review/tag enrichment. The `/settings` page
-can change every knob below the key rows without exposing either provider key.
+can change every knob below the key rows without exposing either provider key. It also maintains
+an optional yt-dlp proxy pool: raw URLs are accepted one at a time and only server-side masks are
+rendered afterwards. Environment and UI entries are combined; one random proxy is kept for all
+yt-dlp work belonging to a single game.
 
 | Variable | Meaning |
 | --- | --- |
@@ -155,3 +158,8 @@ can change every knob below the key rows without exposing either provider key.
 | `YOUTUBE_SEARCH_MAX_RESULTS` | Results read from the single search page (50 costs no more than 5) |
 | `YOUTUBE_RETRY_INTERVAL_HOURS` | Delay after provider/source failures |
 | `YOUTUBE_NO_RESULT_REFRESH_DAYS` | When an empty search may be repeated |
+| `YOUTUBE_PROXIES` | Comma/newline-separated yt-dlp proxy URLs (`http(s)`, `socks4`, `socks5`); environment entries are read-only in the UI |
+
+Proxy URLs use `protocol://user:pass@ip:port`. Percent-encode commas inside credentials as `%2C`.
+Do not commit real proxy URLs: credentials added in the web interface are stored in PostgreSQL and
+are never returned to the browser after submission.

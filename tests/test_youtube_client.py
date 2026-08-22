@@ -17,9 +17,38 @@ from app.collectors.youtube import (
     build_search_query,
     candidate_rejection_reason,
     search_title,
+    search_video_ids,
 )
 
 GAMING = "20"
+
+
+def test_yt_dlp_search_receives_the_selected_socks_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yt_dlp
+
+    proxy = "socks5://user:pass@127.0.0.1:1080"
+    seen: list[dict] = []
+
+    class Downloader:
+        def __init__(self, options: dict) -> None:
+            seen.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def extract_info(self, _url: str, *, download: bool) -> dict:
+            assert download is False
+            return {"entries": [{"id": "one"}]}
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", Downloader)
+
+    assert search_video_ids("Game gameplay", 50, proxy) == ["one"]
+    assert seen[0]["proxy"] == proxy
 
 
 def response(payload: dict, status: int = 200) -> httpx.Response:
@@ -118,7 +147,13 @@ def test_most_viewed_relevant_candidate_wins_after_filtering() -> None:
     client = YouTubeClient(
         api_key="fake",
         client=http,
-        search_ids=lambda _query, _limit: ["trailer", "silent", "winner", "smaller", "short"],
+        search_ids=lambda _query, _limit, _proxy: [
+            "trailer",
+            "silent",
+            "winner",
+            "smaller",
+            "short",
+        ],
     )
     result = client.search_game("Elden Ring")
 
@@ -241,7 +276,7 @@ def test_empty_search_stops_without_a_metadata_request() -> None:
         base_url="https://www.googleapis.com/youtube/v3",
         transport=httpx.MockTransport(handler),
     )
-    client = YouTubeClient(api_key="fake", client=http, search_ids=lambda _q, _n: [])
+    client = YouTubeClient(api_key="fake", client=http, search_ids=lambda _q, _n, _p: [])
     result = client.search_game("Obscure Game")
 
     assert calls == 0
@@ -265,7 +300,7 @@ def test_results_are_hydrated_in_batches_of_fifty() -> None:
     client = YouTubeClient(
         api_key="fake",
         client=http,
-        search_ids=lambda _q, _n: [f"v{index}" for index in range(120)],
+        search_ids=lambda _q, _n, _p: [f"v{index}" for index in range(120)],
     )
     result = client.search_game("Elden Ring")
 
@@ -274,7 +309,7 @@ def test_results_are_hydrated_in_batches_of_fifty() -> None:
 
 
 def test_a_broken_search_is_a_retryable_failure_not_an_empty_result() -> None:
-    def exploding(_query: str, _limit: int) -> list[str]:
+    def exploding(_query: str, _limit: int, _proxy: str | None) -> list[str]:
         raise YouTubeTemporaryError("yt-dlp search failed")
 
     http = httpx.Client(
@@ -303,7 +338,7 @@ def test_quota_error_has_its_own_exception() -> None:
         base_url="https://www.googleapis.com/youtube/v3",
         transport=httpx.MockTransport(handler),
     )
-    client = YouTubeClient(api_key="fake", client=http, search_ids=lambda _q, _n: ["one"])
+    client = YouTubeClient(api_key="fake", client=http, search_ids=lambda _q, _n, _p: ["one"])
 
     try:
         client.search_game("Any Game")
