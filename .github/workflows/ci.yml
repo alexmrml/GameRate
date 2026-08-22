@@ -7,6 +7,20 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: gamerate
+          POSTGRES_USER: gamerate
+          POSTGRES_PASSWORD: gamerate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gamerate -d gamerate"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,6 +31,10 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
+      - name: Verify migrations on empty PostgreSQL
+        env:
+          DATABASE_URL: postgresql+psycopg://gamerate:gamerate@127.0.0.1:5432/gamerate
+        run: alembic upgrade head && alembic check
       - run: pytest
 
   docker:
@@ -28,4 +46,3 @@ jobs:
         with:
           context: .
           push: false
-
