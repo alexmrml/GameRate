@@ -16,7 +16,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.collectors.metacritic import MetacriticClient
 from app.config import settings
-from app.models import CrawlStatus, Game, GamePlatform, ProcessingRun, RunStatus
+from app.models import (
+    AIEnrichmentRetry,
+    CrawlStatus,
+    Game,
+    GamePlatform,
+    ProcessingRun,
+    RunStatus,
+)
 from app.services.crawl import (
     finish_state,
     get_or_create_state,
@@ -25,7 +32,12 @@ from app.services.crawl import (
     plan_next_batch,
     start_state,
 )
-from app.services.enrichment import EnrichmentSession, GameEnrichment
+from app.services.enrichment import (
+    EnrichmentSession,
+    GameEnrichment,
+    remove_enrichment_retry,
+    sync_enrichment_retry_queue,
+)
 from app.services.games import apply_game_snapshot
 from app.services.youtube import (
     NO_CANDIDATE,
@@ -42,6 +54,7 @@ logger = logging.getLogger("gamerate.pipeline")
 MAX_TRACKED_ERRORS = 20
 MAX_TRACKED_AI_GAMES = 30
 MAX_TRACKED_YOUTUBE_GAMES = 30
+MAX_AI_RETRY_GAMES = 5
 
 
 def _touch(db: Session, run: ProcessingRun, message: str | None = None, **fields: Any) -> None:
@@ -137,7 +150,9 @@ def execute_run(db: Session, run: ProcessingRun, client: MetacriticClient) -> Pr
             )
 
     ai_details = enrich_collected_games(db, run, collected_ids, offset=len(plan.slugs))
-    youtube_offset = len(plan.slugs) + int(ai_details.get("planned") or 0)
+    retry_offset = len(plan.slugs) + int(ai_details.get("planned") or 0)
+    ai_details["retry"] = retry_failed_enrichments(db, run, offset=retry_offset)
+    youtube_offset = retry_offset + int(ai_details["retry"].get("planned") or 0)
     youtube_details = enrich_youtube_games(db, run, collected_ids, offset=youtube_offset)
 
     # A fresh dict, because SQLAlchemy tracks JSON columns by identity, not by content.
@@ -255,6 +270,7 @@ def enrich_collected_games(
         )
         try:
             outcome = session.enrich_game(db, game)
+            sync_enrichment_retry_queue(db, game.id, outcome)
             db.commit()
         except Exception as exc:  # enrichment must never fail a completed crawl
             db.rollback()
@@ -282,6 +298,107 @@ def enrich_collected_games(
     return summary
 
 
+def retry_failed_enrichments(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    offset: int,
+    session: EnrichmentSession | None = None,
+    limit: int = MAX_AI_RETRY_GAMES,
+) -> dict[str, Any]:
+    """Retry up to five distinct failed games once, in random order, every crawl run."""
+    session = session or EnrichmentSession(db, max_attempts=1)
+    summary: dict[str, Any] = {
+        "enabled": session.enabled,
+        "planned": 0,
+        "recovered": 0,
+        "failed": 0,
+        "skipped": 0,
+        "calls": 0,
+        "games": [],
+    }
+    if not session.enabled:
+        summary["disabled_reason"] = session.disabled_reason
+        return summary
+
+    # A game may have both review and tag work queued. Shuffle tasks, then keep only the
+    # first task for each game so the five-request allowance always covers five games.
+    rows = list(db.scalars(select(AIEnrichmentRetry).order_by(func.random())))
+    targets: list[AIEnrichmentRetry] = []
+    seen_games: set[uuid.UUID] = set()
+    for row in rows:
+        if row.game_id in seen_games:
+            continue
+        targets.append(row)
+        seen_games.add(row.game_id)
+        if len(targets) >= max(limit, 0):
+            break
+
+    summary["planned"] = len(targets)
+    if not targets:
+        return summary
+    _touch(
+        db,
+        run,
+        f"Retrying AI enrichment for {len(targets)} games",
+        progress_total=offset + len(targets),
+    )
+
+    for index, queued in enumerate(targets, start=1):
+        task = queued.task
+        game = db.scalar(
+            select(Game)
+            .where(Game.id == queued.game_id)
+            .options(
+                selectinload(Game.genres),
+                selectinload(Game.tags),
+                selectinload(Game.platforms).selectinload(GamePlatform.platform),
+            )
+        )
+        if game is None:
+            db.delete(queued)
+            db.commit()
+            summary["skipped"] += 1
+            continue
+        _touch(
+            db,
+            run,
+            f"Retrying AI {task} for {game.title} ({index}/{len(targets)})",
+            current_game_id=game.id,
+        )
+        try:
+            outcome = session.enrich_game(db, game, tasks={task})
+            if task not in outcome.attempted_tasks:
+                remove_enrichment_retry(db, queued)
+                summary["skipped"] += 1
+            else:
+                sync_enrichment_retry_queue(db, game.id, outcome)
+                if task in outcome.succeeded_tasks:
+                    summary["recovered"] += 1
+                else:
+                    summary["failed"] += 1
+            db.commit()
+        except Exception as exc:  # a retry is as best-effort as the primary AI phase
+            db.rollback()
+            logger.exception("AI backlog retry crashed game=%s run=%s", game.id, run.id)
+            outcome = GameEnrichment(title=game.title, error=f"{type(exc).__name__}: {exc}"[:500])
+            summary["failed"] += 1
+
+        if len(summary["games"]) < MAX_TRACKED_AI_GAMES:
+            details = outcome.as_details()
+            details["task"] = task
+            summary["games"].append(details)
+        _touch(db, run, run.message, progress_current=offset + index, current_game_id=None)
+
+        if session.disabled_reason:
+            summary["disabled_reason"] = session.disabled_reason
+            summary["skipped"] += len(targets) - index
+            break
+
+    summary["calls"] = session.calls
+    return summary
+
+
 def _ai_note(ai_details: dict[str, Any]) -> str:
     if not ai_details.get("enabled"):
         return ""
@@ -293,6 +410,9 @@ def _ai_note(ai_details: dict[str, Any]) -> str:
         parts.append(f"{failed} AI failure{'' if failed == 1 else 's'}")
     if ai_details.get("disabled_reason"):
         parts.append("AI stopped")
+    retry = ai_details.get("retry") or {}
+    if retry.get("recovered"):
+        parts.append(f"{retry['recovered']} retry recovered")
     return f" · AI: {', '.join(parts)}" if parts else ""
 
 

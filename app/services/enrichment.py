@@ -30,7 +30,7 @@ from app.collectors.gemini import (
     ReviewExcerpt,
 )
 from app.config import settings
-from app.models import Audience, Game, GameReview, ReviewSummary, Tag
+from app.models import AIEnrichmentRetry, Audience, Game, GameReview, ReviewSummary, Tag
 from app.services.app_settings import get_setting
 from app.services.games import normalize_title
 from app.services.similarity import lead_platform
@@ -43,6 +43,9 @@ SKIPPED_TOO_FEW = "too_few_reviews"
 SKIPPED_UNCHANGED = "unchanged"
 GENERATED = "generated"
 FAILED = "failed"
+REVIEWS_TASK = "reviews"
+TAGS_TASK = "tags"
+RETRY_TASKS = {REVIEWS_TASK, TAGS_TASK}
 
 
 @dataclass(slots=True)
@@ -66,6 +69,9 @@ class GameEnrichment:
     summaries: dict[str, str] = field(default_factory=dict)
     tags: str = SKIPPED_UNCHANGED
     error: str | None = None
+    attempted_tasks: set[str] = field(default_factory=set)
+    succeeded_tasks: set[str] = field(default_factory=set)
+    retryable_failures: set[str] = field(default_factory=set)
 
     @property
     def called_model(self) -> bool:
@@ -220,7 +226,13 @@ def _store_summary(
 class EnrichmentSession:
     """Holds the Gemini client and the disabled state for the duration of one run."""
 
-    def __init__(self, db: Session, client: GeminiClient | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        client: GeminiClient | None = None,
+        *,
+        max_attempts: int | None = None,
+    ) -> None:
         self.enabled = bool(get_setting(db, "ai.enabled"))
         self.model = str(get_setting(db, "ai.model"))
         self.min_reviews = int(get_setting(db, "ai.min_reviews"))
@@ -233,6 +245,7 @@ class EnrichmentSession:
         self.enriched = 0
         self._client = client
         self._client_ready = client is not None
+        self._max_attempts = max_attempts
 
         if not self.enabled:
             self.disabled_reason = "AI enrichment is turned off in settings"
@@ -246,7 +259,7 @@ class EnrichmentSession:
 
     def client(self) -> GeminiClient:
         if self._client is None:
-            self._client = GeminiClient(model=self.model)
+            self._client = GeminiClient(model=self.model, max_attempts=self._max_attempts)
             self._client_ready = True
         return self._client
 
@@ -300,14 +313,29 @@ class EnrichmentSession:
             wanted=wanted, status=status, tags_stale=game.ai_tags_digest != tag_digest(game)
         )
 
-    def enrich_game(self, db: Session, game: Game) -> GameEnrichment:
+    def enrich_game(
+        self,
+        db: Session,
+        game: Game,
+        *,
+        tasks: set[str] | None = None,
+    ) -> GameEnrichment:
         """Enrich one game. Never raises: problems are reported on the result."""
+        if tasks is not None and not tasks <= RETRY_TASKS:
+            raise ValueError(f"Unknown enrichment task: {sorted(tasks - RETRY_TASKS)}")
         outcome = GameEnrichment(title=game.title)
         if not self.enabled or self.disabled_reason:
             outcome.error = self.disabled_reason
             return outcome
 
         plan = self.plan(db, game)
+        if tasks is not None:
+            if REVIEWS_TASK not in tasks:
+                for audience in plan.wanted:
+                    plan.status[audience] = SKIPPED_UNCHANGED
+                plan.wanted = {}
+            if TAGS_TASK not in tasks:
+                plan.tags_stale = False
         outcome.summaries = {audience.value: state for audience, state in plan.status.items()}
         if not plan.wanted and not plan.tags_stale:
             return outcome
@@ -327,11 +355,12 @@ class EnrichmentSession:
         limit = settings.ai_max_reviews_per_audience
 
         if plan.wanted:
+            outcome.attempted_tasks.add(REVIEWS_TASK)
             critics = _excerpts(plan.rows(Audience.CRITICS), limit)
             users = _excerpts(plan.rows(Audience.USERS), limit)
+            self.calls += 1
             try:
                 analysis = client.analyze_reviews(context, critics, users)
-                self.calls += 1
             except GeminiUnavailable as exc:
                 self._disable(str(exc))
                 outcome.error = str(exc)
@@ -340,10 +369,12 @@ class EnrichmentSession:
                 return outcome
             except (GeminiTemporaryError, GeminiInvalidResponse) as exc:
                 outcome.error = f"{type(exc).__name__}: {exc}"
+                outcome.retryable_failures.add(REVIEWS_TASK)
                 for audience in plan.wanted:
                     outcome.summaries[audience.value] = FAILED
                 logger.warning("review analysis failed for %s: %s", game.title, exc)
             else:
+                outcome.succeeded_tasks.add(REVIEWS_TASK)
                 for audience, result in (
                     (Audience.CRITICS, analysis.critics),
                     (Audience.USERS, analysis.users),
@@ -364,9 +395,10 @@ class EnrichmentSession:
                     outcome.summaries[audience.value] = GENERATED
 
         if plan.tags_stale and not outcome.error:
+            outcome.attempted_tasks.add(TAGS_TASK)
+            self.calls += 1
             try:
                 tag_result = client.derive_tags(context)
-                self.calls += 1
             except GeminiUnavailable as exc:
                 self._disable(str(exc))
                 outcome.error = str(exc)
@@ -374,8 +406,10 @@ class EnrichmentSession:
             except (GeminiTemporaryError, GeminiInvalidResponse) as exc:
                 outcome.tags = FAILED
                 outcome.error = outcome.error or f"{type(exc).__name__}: {exc}"
+                outcome.retryable_failures.add(TAGS_TASK)
                 logger.warning("tag derivation failed for %s: %s", game.title, exc)
             else:
+                outcome.succeeded_tasks.add(TAGS_TASK)
                 tags = [_get_or_create_tag(db, facet, value) for facet, value in tag_result.flat()]
                 game.tags = tags
                 game.ai_tags_digest = tag_digest(game)
@@ -387,3 +421,49 @@ class EnrichmentSession:
             self.enriched += 1
         db.flush()
         return outcome
+
+
+def sync_enrichment_retry_queue(
+    db: Session,
+    game_id: Any,
+    outcome: GameEnrichment,
+) -> None:
+    """Persist exhausted temporary/schema failures and clear tasks that recovered."""
+    for task in outcome.succeeded_tasks:
+        row = db.scalar(
+            select(AIEnrichmentRetry).where(
+                AIEnrichmentRetry.game_id == game_id,
+                AIEnrichmentRetry.task == task,
+            )
+        )
+        if row is not None:
+            db.delete(row)
+
+    now = utc_now()
+    for task in outcome.retryable_failures:
+        row = db.scalar(
+            select(AIEnrichmentRetry).where(
+                AIEnrichmentRetry.game_id == game_id,
+                AIEnrichmentRetry.task == task,
+            )
+        )
+        if row is None:
+            row = AIEnrichmentRetry(
+                game_id=game_id,
+                task=task,
+                last_error=(outcome.error or "Gemini request failed")[:2000],
+                failed_at=now,
+                last_attempted_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(row)
+        else:
+            row.last_error = (outcome.error or "Gemini request failed")[:2000]
+            row.last_attempted_at = now
+            row.updated_at = now
+
+
+def remove_enrichment_retry(db: Session, row: AIEnrichmentRetry) -> None:
+    """Drop queue work that no longer has stale input even without a model call."""
+    db.delete(row)

@@ -10,6 +10,7 @@ from app.collectors.gemini import GeminiTemporaryError, GeminiUnavailable
 from app.collectors.youtube import YouTubeTemporaryError
 from app.db import SessionLocal
 from app.models import (
+    AIEnrichmentRetry,
     CrawlStatus,
     DailyCrawlState,
     DailyProcessedGame,
@@ -288,7 +289,7 @@ def test_ai_enrichment_runs_inside_the_batch_and_extends_progress(
 ) -> None:
     gemini = StubGeminiClient()
     monkeypatch.setattr(
-        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+        pipeline, "EnrichmentSession", lambda db, **kwargs: EnrichmentSession(db, client=gemini)
     )
 
     result = run_batch(rich_stub("alpha", "beta"))
@@ -318,6 +319,15 @@ def test_ai_enrichment_runs_inside_the_batch_and_extends_progress(
                 "tags": "generated",
             },
         ],
+        "retry": {
+            "enabled": True,
+            "planned": 0,
+            "recovered": 0,
+            "failed": 0,
+            "skipped": 0,
+            "calls": 0,
+            "games": [],
+        },
     }
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 4
@@ -328,7 +338,7 @@ def test_a_gemini_failure_does_not_fail_the_crawl(
 ) -> None:
     gemini = StubGeminiClient(review_error=GeminiTemporaryError("503 model overloaded"))
     monkeypatch.setattr(
-        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+        pipeline, "EnrichmentSession", lambda db, **kwargs: EnrichmentSession(db, client=gemini)
     )
 
     result = run_batch(rich_stub("alpha", "beta"))
@@ -336,10 +346,62 @@ def test_a_gemini_failure_does_not_fail_the_crawl(
     assert result["status"] is RunStatus.SUCCEEDED
     assert "2 AI failures" in result["message"]
     assert result["details"]["ai"]["failed"] == 2
-    assert len(gemini.review_calls) == 2  # the second game was still attempted
+    # Both normal requests fail, then both distinct games receive the one-shot backlog retry.
+    assert len(gemini.review_calls) == 4
+    assert result["details"]["ai"]["retry"]["planned"] == 2
+    assert result["details"]["ai"]["retry"]["failed"] == 2
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(Game)) == 2
         assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 0
+
+
+def test_each_run_retries_at_most_five_distinct_failed_games_once(
+    frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemini = StubGeminiClient(review_error=GeminiTemporaryError("429 quota exceeded"))
+    monkeypatch.setattr(
+        pipeline, "EnrichmentSession", lambda db, **kwargs: EnrichmentSession(db, client=gemini)
+    )
+
+    first = run_batch(rich_stub("alpha", "beta", "gamma", "delta", "epsilon", "zeta"))
+
+    assert first["details"]["ai"]["retry"]["planned"] == 5
+    assert first["details"]["ai"]["retry"]["calls"] == 5
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(AIEnrichmentRetry)) == 6
+
+    gemini.review_error = None
+    second = run_batch(rich_stub())
+
+    retry = second["details"]["ai"]["retry"]
+    assert retry["planned"] == 5
+    assert retry["recovered"] == 5
+    assert retry["calls"] == 5
+    assert len({item["title"] for item in retry["games"]}) == 5
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(AIEnrichmentRetry)) == 1
+        assert db.scalar(select(func.count()).select_from(ReviewSummary)) == 10
+
+
+def test_an_exhausted_tag_request_is_retried_as_tag_work_only(
+    frozen_day: DayClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemini = StubGeminiClient(tag_error=GeminiTemporaryError("429 quota exceeded"))
+    monkeypatch.setattr(
+        pipeline, "EnrichmentSession", lambda db, **kwargs: EnrichmentSession(db, client=gemini)
+    )
+
+    result = run_batch(rich_stub("alpha"))
+
+    retry = result["details"]["ai"]["retry"]
+    assert retry["planned"] == 1
+    assert retry["failed"] == 1
+    assert retry["games"][0]["task"] == "tags"
+    assert len(gemini.review_calls) == 1
+    assert gemini.tag_calls == ["Alpha", "Alpha"]
+    with SessionLocal() as db:
+        queued = db.scalar(select(AIEnrichmentRetry))
+        assert queued.task == "tags"
 
 
 def test_a_rejected_key_stops_enrichment_but_keeps_the_crawl_result(
@@ -347,7 +409,7 @@ def test_a_rejected_key_stops_enrichment_but_keeps_the_crawl_result(
 ) -> None:
     gemini = StubGeminiClient(review_error=GeminiUnavailable("403 API key not valid"))
     monkeypatch.setattr(
-        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+        pipeline, "EnrichmentSession", lambda db, **kwargs: EnrichmentSession(db, client=gemini)
     )
 
     result = run_batch(rich_stub("alpha", "beta", "gamma"))
@@ -384,7 +446,7 @@ def test_youtube_failures_do_not_change_the_crawl_or_review_enrichment_result(
 
     gemini = StubGeminiClient()
     monkeypatch.setattr(
-        pipeline, "EnrichmentSession", lambda db: EnrichmentSession(db, client=gemini)
+        pipeline, "EnrichmentSession", lambda db, **kwargs: EnrichmentSession(db, client=gemini)
     )
     monkeypatch.setattr(
         pipeline,

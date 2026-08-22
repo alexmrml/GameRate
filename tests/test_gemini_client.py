@@ -108,6 +108,43 @@ def test_a_retried_call_can_still_succeed() -> None:
     assert len(fake.models.calls) == 2
 
 
+def test_retries_wait_thirty_seconds_between_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+    clock = [0.0]
+
+    def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr("app.collectors.gemini.time.monotonic", lambda: clock[0])
+    fake = sdk(reply({"critics": {"liked": []}}))
+    client = GeminiClient(client=fake, model="test-model", sleep=sleep)
+
+    with pytest.raises(GeminiInvalidResponse):
+        client.analyze_reviews(GAME, CRITICS, [])
+
+    assert waits == [30.0, 30.0]
+
+
+def test_a_single_attempt_client_does_not_sleep_or_retry() -> None:
+    waits: list[float] = []
+    fake = sdk(reply({"critics": {"liked": []}}))
+    client = GeminiClient(
+        client=fake,
+        model="test-model",
+        sleep=waits.append,
+        max_attempts=1,
+    )
+
+    with pytest.raises(GeminiInvalidResponse):
+        client.analyze_reviews(GAME, CRITICS, [])
+
+    assert len(fake.models.calls) == 1
+    assert waits == []
+
+
 def test_rate_limits_are_temporary_failures() -> None:
     error = genai_errors.APIError(429, {"error": {"message": "quota exceeded"}})
     fake = sdk(error)

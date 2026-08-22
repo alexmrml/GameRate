@@ -43,7 +43,9 @@ class Settings(BaseSettings):
     gemini_model: str = "gemma-4-31b-it"
     gemini_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     gemini_max_retries: int = Field(default=3, ge=1, le=10)
-    gemini_retry_delay_seconds: float = Field(default=2.0, ge=0.0)
+    # Three attempts are made inside one logical call. Temporary and schema failures wait
+    # at least 30 seconds before the next attempt so a rate-limit window can actually move.
+    gemini_retry_delay_seconds: float = Field(default=30.0, ge=30.0)
     # Free Gemini keys are limited per minute; pacing keeps a batch from tripping the quota.
     gemini_requests_per_minute: int = Field(default=25, ge=1, le=600)
     ai_enabled: bool = True

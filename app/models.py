@@ -265,6 +265,31 @@ class ReviewSummary(Base):
     platform: Mapped[Platform | None] = relationship()
 
 
+class AIEnrichmentRetry(Base):
+    """Durable retry work left by an exhausted Gemini request.
+
+    Review analysis and tag derivation are separate tasks because either may fail while the
+    other is already current. A unique row per game/task prevents repeated crawl runs from
+    growing a duplicate queue.
+    """
+
+    __tablename__ = "ai_enrichment_retries"
+    __table_args__ = (UniqueConstraint("game_id", "task", name="uq_ai_enrichment_retry_game_task"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("games.id", ondelete="CASCADE"), index=True
+    )
+    task: Mapped[str] = mapped_column(String(20), index=True)
+    last_error: Mapped[str] = mapped_column(Text)
+    failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    game: Mapped[Game] = relationship()
+
+
 class YouTubeAnalysis(Base):
     __tablename__ = "youtube_analyses"
     __table_args__ = (UniqueConstraint("game_id", name="uq_youtube_analysis_game"),)

@@ -575,6 +575,7 @@ class GeminiClient:
         model: str | None = None,
         client: Any = None,
         sleep: Any = time.sleep,
+        max_attempts: int | None = None,
     ) -> None:
         self.model = model or settings.gemini_model
         key = api_key if api_key is not None else settings.gemini_api_key
@@ -584,6 +585,7 @@ class GeminiClient:
             client = genai.Client(api_key=key)
         self._client = client
         self._sleep = sleep
+        self._max_attempts = max_attempts
         rpm = max(settings.gemini_requests_per_minute, 1)
         self._min_interval = 60.0 / rpm
         self._last_call_at: float | None = None
@@ -625,7 +627,10 @@ class GeminiClient:
         *,
         video_input: bool = False,
     ) -> BaseModel:
-        attempts = max(settings.gemini_max_retries, 1)
+        attempts = max(
+            self._max_attempts if self._max_attempts is not None else settings.gemini_max_retries,
+            1,
+        )
         last_error: Exception | None = None
         retry_after: float | None = None
 
@@ -669,9 +674,10 @@ class GeminiClient:
                     retry_after = None
 
             if attempt < attempts:
-                backoff = settings.gemini_retry_delay_seconds * (2 ** (attempt - 1))
-                # A quota answer states how long to wait; that beats guessing.
-                self._sleep(max(backoff, retry_after or 0.0))
+                # Each logical call gets three attempts. A short exponential retry merely
+                # hammers the same quota window, so every gap is at least 30 seconds; an
+                # explicit provider retryDelay may make it longer.
+                self._sleep(max(settings.gemini_retry_delay_seconds, retry_after or 0.0))
 
         if isinstance(last_error, GeminiInvalidResponse):
             raise last_error
