@@ -78,8 +78,8 @@ jobs:
           test -n "${PROD_KNOWN_HOSTS}"
           test -n "${SSH_PRIVATE_KEY}"
           install -m 700 -d "${HOME}/.ssh"
-          printf '%s\n' "${PROD_KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
-          printf '%s\n' "${SSH_PRIVATE_KEY}" >"${HOME}/.ssh/gamerate_deploy"
+          printf '%s\n' "${PROD_KNOWN_HOSTS}" | tr -d '\r' >"${HOME}/.ssh/known_hosts"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" | tr -d '\r' >"${HOME}/.ssh/gamerate_deploy"
           chmod 600 "${HOME}/.ssh/known_hosts" "${HOME}/.ssh/gamerate_deploy"
       - name: Upload deployment files
         shell: bash
