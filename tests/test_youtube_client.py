@@ -1,4 +1,7 @@
-"""YouTube discovery uses one search and deterministic metadata filtering."""
+"""Discovery: one yt-dlp search, one batched hydration, deterministic filtering.
+
+`search_ids` is always injected here — the suite must never reach youtube.com.
+"""
 
 import json
 
@@ -10,6 +13,7 @@ from app.collectors.youtube import (
     VideoCandidate,
     YouTubeClient,
     YouTubeQuotaExceeded,
+    YouTubeTemporaryError,
     build_search_query,
     candidate_rejection_reason,
     search_title,
@@ -78,17 +82,7 @@ def test_most_viewed_relevant_candidate_wins_after_filtering() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if request.url.path.endswith("/search"):
-            assert "videoDuration" not in request.url.params
-            assert request.url.params["order"] == "viewCount"
-            return response(
-                {
-                    "items": [
-                        {"id": {"videoId": item}}
-                        for item in ("trailer", "silent", "winner", "smaller", "short")
-                    ]
-                }
-            )
+        assert request.url.path.endswith("/videos")
         return response(
             {
                 "items": [
@@ -121,9 +115,14 @@ def test_most_viewed_relevant_candidate_wins_after_filtering() -> None:
         base_url="https://www.googleapis.com/youtube/v3",
         transport=httpx.MockTransport(handler),
     )
-    result = YouTubeClient(api_key="fake", client=http).search_game("Elden Ring")
+    client = YouTubeClient(
+        api_key="fake",
+        client=http,
+        search_ids=lambda _query, _limit: ["trailer", "silent", "winner", "smaller", "short"],
+    )
+    result = client.search_game("Elden Ring")
 
-    assert len(calls) == 2
+    assert len(calls) == 1  # the search costs no Data API call at all
     assert result.selected().video_id == "winner"
     reasons = {item.video_id: item.rejection_reason for item in result.candidates}
     assert reasons["trailer"] == "excluded:trailer"
@@ -242,11 +241,50 @@ def test_empty_search_stops_without_a_metadata_request() -> None:
         base_url="https://www.googleapis.com/youtube/v3",
         transport=httpx.MockTransport(handler),
     )
-    result = YouTubeClient(api_key="fake", client=http).search_game("Obscure Game")
+    client = YouTubeClient(api_key="fake", client=http, search_ids=lambda _q, _n: [])
+    result = client.search_game("Obscure Game")
 
-    assert calls == 1
+    assert calls == 0
     assert result.candidates == []
     assert result.selected() is None
+
+
+def test_results_are_hydrated_in_batches_of_fifty() -> None:
+    """A yt-dlp page can exceed what one videos.list call accepts."""
+    batches: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ids = request.url.params["id"].split(",")
+        batches.append(len(ids))
+        return response({"items": [video(item, f"Elden Ring Part {item}", 10) for item in ids]})
+
+    http = httpx.Client(
+        base_url="https://www.googleapis.com/youtube/v3",
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeClient(
+        api_key="fake",
+        client=http,
+        search_ids=lambda _q, _n: [f"v{index}" for index in range(120)],
+    )
+    result = client.search_game("Elden Ring")
+
+    assert batches == [50, 50, 20]
+    assert len(result.candidates) == 120
+
+
+def test_a_broken_search_is_a_retryable_failure_not_an_empty_result() -> None:
+    def exploding(_query: str, _limit: int) -> list[str]:
+        raise YouTubeTemporaryError("yt-dlp search failed")
+
+    http = httpx.Client(
+        base_url="https://www.googleapis.com/youtube/v3",
+        transport=httpx.MockTransport(lambda _r: response({"items": []})),
+    )
+    client = YouTubeClient(api_key="fake", client=http, search_ids=exploding)
+
+    with pytest.raises(YouTubeTemporaryError):
+        client.search_game("Any Game")
 
 
 def test_quota_error_has_its_own_exception() -> None:
@@ -265,7 +303,7 @@ def test_quota_error_has_its_own_exception() -> None:
         base_url="https://www.googleapis.com/youtube/v3",
         transport=httpx.MockTransport(handler),
     )
-    client = YouTubeClient(api_key="fake", client=http)
+    client = YouTubeClient(api_key="fake", client=http, search_ids=lambda _q, _n: ["one"])
 
     try:
         client.search_game("Any Game")
@@ -273,3 +311,22 @@ def test_quota_error_has_its_own_exception() -> None:
         assert "quota" in str(exc)
     else:
         raise AssertionError("quota error was not classified")
+
+
+def test_a_chapter_counter_after_the_name_also_marks_it_as_a_level() -> None:
+    """ "Jusant - Chapter 1 - Daymark" and "Jusant - DAYMARK (Chapter 1)" are one video."""
+    reason = candidate_rejection_reason(
+        candidate(
+            "Jusant – DAYMARK (Chapter 1) | Full Gameplay Walkthrough",
+            description="Daymark chapter of Jusant, full gameplay walkthrough.",
+        ),
+        "Daymark",
+    )
+
+    assert reason == "name_not_prominent"
+
+
+def test_an_episode_number_on_the_game_itself_is_not_a_level_label() -> None:
+    described = candidate("Slayblade - Part 1", description="Slayblade gameplay, part one.")
+
+    assert candidate_rejection_reason(described, "Slayblade") is None

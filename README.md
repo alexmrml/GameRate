@@ -92,12 +92,18 @@ The same processing run also fills a separate let's-play perspective for games t
 have a useful result. Games that critics have reviewed are worked through first, so a catalogue
 full of brand-new indie releases does not spend every run on titles nobody has filmed.
 
-Discovery makes one popularity-ordered YouTube Data API search per game, hydrates all returned
-metadata in one `videos.list`, then rejects everything that is not one creator playing this game
-and talking about it: anything under eight minutes, Shorts, videos YouTube does not file under
-Gaming, trailers, reviews, guides, collectible runs, compilations, cutscene movies, mod footage
-and videos advertising no commentary. The most-viewed survivor wins. A playthrough of a demo now
-counts — for a game released last week it is often the only let's-play that exists.
+Discovery makes one YouTube search per game, ordered by view count and served by yt-dlp, then
+hydrates the results through the Data API's `videos.list`. It rejects everything that is not one
+creator playing this game and talking about it: anything under eight minutes, Shorts, videos
+YouTube does not file under Gaming, trailers, reviews, guides, collectible runs, compilations,
+cutscene movies, mod footage and videos advertising no commentary. The most-viewed survivor wins.
+A playthrough of a demo counts — for a game released last week it is often the only let's-play
+that exists.
+
+Searching through yt-dlp means the number of games discovered per day is no longer capped: the
+Data API's search endpoint allows only about 100 calls a day, while the metadata endpoint it
+still uses costs 1 of 10 000 units per 50 videos. A search takes about two seconds and needs no
+cookies or account.
 
 Empty searches and provider errors are persisted, so an hourly run does not repeat them
 immediately; candidates are cached so a silent or unavailable video can advance to the next
@@ -132,15 +138,14 @@ can change every knob below the key rows without exposing either provider key.
 
 | Variable | Meaning |
 | --- | --- |
-| `GOOGLE_CLOUD_API_KEY` | YouTube Data API key; environment-only |
+| `GOOGLE_CLOUD_API_KEY` | YouTube Data API key, used for video metadata; environment-only |
 | `YOUTUBE_ANALYSIS_ENABLED` | Enable/disable the YouTube phase |
 | `YOUTUBE_ANALYSIS_MODEL` | Model reading the subtitle fragment (`gemma-4-31b-it`) |
 | `YOUTUBE_VIDEO_FALLBACK_MODEL` | Multimodal model used only when subtitles are missing |
 | `YOUTUBE_ANALYSIS_FRAGMENT_MINUTES` | Length of the analyzed fragment near the end |
 | `YOUTUBE_TRANSCRIPT_MIN_WORDS_PER_MINUTE` | Speech rate below which a fragment counts as silence |
 | `YOUTUBE_ANALYSIS_MAX_GAMES_PER_RUN` | Backlog cap per processing run (default 5) |
-| `YOUTUBE_MAX_SEARCHES_PER_RUN` | Data API searches per run; the search allowance is ~100 calls a day |
 | `YOUTUBE_MAX_VIDEO_FALLBACKS_PER_RUN` | Multimodal video calls per run (default 1) |
-| `YOUTUBE_SEARCH_MAX_RESULTS` | Candidates fetched by the single search request (50 costs no more than 5) |
+| `YOUTUBE_SEARCH_MAX_RESULTS` | Results read from the single search page (50 costs no more than 5) |
 | `YOUTUBE_RETRY_INTERVAL_HOURS` | Delay after provider/source failures |
 | `YOUTUBE_NO_RESULT_REFRESH_DAYS` | When an empty search may be repeated |

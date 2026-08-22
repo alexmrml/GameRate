@@ -24,7 +24,6 @@ from app.services.youtube import (
     NO_CANDIDATE,
     NO_TRANSCRIPT,
     NO_USEFUL_COMMENTARY,
-    SEARCH_BUDGET,
     SUCCESS,
     TRANSCRIPT_ERROR,
     UNCHANGED,
@@ -400,10 +399,9 @@ def test_provider_errors_get_distinct_retryable_statuses() -> None:
     assert as_utc(row_for(gemini_game.id).next_retry_at) > utc_now()
 
 
-def test_the_search_budget_defers_a_game_instead_of_failing_it() -> None:
-    """A run out of Data API units must not burn the game's retry window."""
-    first = store_game("budget-one")
-    second = store_game("budget-two")
+def test_every_game_in_a_run_may_search_now_that_search_is_not_rationed() -> None:
+    """The old per-run search cap existed only for search.list; yt-dlp has no such ceiling."""
+    games = [store_game(f"searchable-{index}") for index in range(4)]
     youtube = FakeYouTube([candidate("only")])
     transcripts = FakeTranscripts({"only": spoken_track("only")})
 
@@ -415,14 +413,12 @@ def test_the_search_budget_defers_a_game_instead_of_failing_it() -> None:
             gemini_client=FakeGemini(),
             video_gemini_client=FakeGemini(method="video"),
         )
-        session.max_searches = 1
-        assert session.enrich_game(db, db.get(Game, first.id)).status == SUCCESS
-        deferred = session.enrich_game(db, db.get(Game, second.id))
+        for game in games:
+            session.enrich_game(db, db.get(Game, game.id))
         db.commit()
 
-    assert deferred.status == SEARCH_BUDGET
-    assert youtube.calls == ["Test Game"]
-    assert row_for(second.id).next_retry_at is None  # picked up again by the next run
+    assert len(youtube.calls) == len(games)
+    assert session.search_calls == len(games)
 
 
 def test_a_yt_dlp_failure_eventually_reaches_the_video_fallback() -> None:

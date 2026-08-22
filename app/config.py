@@ -71,14 +71,10 @@ class Settings(BaseSettings):
     youtube_transcript_min_words_per_minute: int = Field(default=15, ge=1, le=400)
     youtube_transcript_timeout_seconds: float = Field(default=60.0, gt=0)
     youtube_analysis_max_games_per_run: int = Field(default=5, ge=0, le=50)
-    # search.list draws on its own daily allowance of about 100 calls, separate from the
-    # units the other endpoints spend, so it is the scarce resource here. Three per run
-    # keeps 24 hourly runs at 72 a day with headroom for manual runs.
-    youtube_max_searches_per_run: int = Field(default=3, ge=0, le=50)
     youtube_max_video_fallbacks_per_run: int = Field(default=1, ge=0, le=10)
-    # One search costs the same whether it returns 5 results or 50, and the filter needs
-    # depth: for a popular game the most-viewed results are shorts and trailers.
-    youtube_search_max_results: int = Field(default=50, ge=5, le=50)
+    # Searching costs nothing now that yt-dlp serves it, and one search returns the same
+    # page whether we read 5 rows or 50, so read the depth the filter wants.
+    youtube_search_max_results: int = Field(default=50, ge=5, le=100)
     youtube_retry_interval_hours: int = Field(default=24, ge=1)
     youtube_no_result_refresh_days: int = Field(default=30, ge=1)
 

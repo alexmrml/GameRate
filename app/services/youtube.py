@@ -71,8 +71,6 @@ GEMINI_UNAVAILABLE = "gemini_unavailable"
 GEMINI_QUOTA_EXHAUSTED = "gemini_quota_exhausted"
 NO_USEFUL_COMMENTARY = "no_useful_commentary"
 UNCHANGED = "unchanged"
-# Not persisted: the run simply ran out of Data API budget before reaching this game.
-SEARCH_BUDGET = "search_budget"
 
 _RETRY_SAME_SOURCE = {
     PENDING,
@@ -151,7 +149,6 @@ class YouTubeEnrichmentSession:
         self.fragment_minutes = int(get_setting(db, "youtube.fragment_minutes"))
         self.min_words_per_minute = int(get_setting(db, "youtube.min_words_per_minute"))
         self.max_games = int(get_setting(db, "youtube.max_games_per_run"))
-        self.max_searches = int(get_setting(db, "youtube.max_searches_per_run"))
         self.max_video_fallbacks = int(get_setting(db, "youtube.max_video_fallbacks_per_run"))
         self.disabled_reason: str | None = None
         self.youtube_disabled_reason: str | None = None
@@ -225,9 +222,8 @@ class YouTubeEnrichmentSession:
         if candidate is None:
             candidate = self._discover(row, game, outcome)
             if candidate is None:
-                if outcome.status not in {SEARCH_BUDGET}:
-                    outcome.status = row.status
-                    db.flush()
+                outcome.status = row.status
+                db.flush()
                 return outcome
 
         window, fallback_source = self._find_transcript(db, row, candidate, outcome)
@@ -497,10 +493,6 @@ class YouTubeEnrichmentSession:
             self._failure(row, YOUTUBE_UNAVAILABLE, self.youtube_disabled_reason)
             outcome.status = row.status
             outcome.error = row.status_reason
-            return None
-        if self.search_calls >= max(self.max_searches, 0):
-            # Not a failure: the game keeps its pending state and the next run searches.
-            outcome.status = SEARCH_BUDGET
             return None
         try:
             client = self.youtube_client()

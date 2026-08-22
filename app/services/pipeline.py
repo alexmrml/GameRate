@@ -30,7 +30,6 @@ from app.services.games import apply_game_snapshot
 from app.services.youtube import (
     NO_CANDIDATE,
     NO_USEFUL_COMMENTARY,
-    SEARCH_BUDGET,
     SUCCESS,
     UNCHANGED,
     YouTubeEnrichmentSession,
@@ -388,7 +387,7 @@ def enrich_youtube_games(
                 summary["succeeded"] += 1
             elif outcome.status == NO_CANDIDATE:
                 summary["no_candidate"] += 1
-            elif outcome.status in {UNCHANGED, SEARCH_BUDGET}:
+            elif outcome.status == UNCHANGED:
                 summary["skipped"] += 1
             elif outcome.status == NO_USEFUL_COMMENTARY or outcome.error:
                 summary["failed"] += 1

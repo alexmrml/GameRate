@@ -1,7 +1,18 @@
-"""Read-only YouTube Data API discovery and deterministic candidate filtering."""
+"""Read-only let's-play discovery and deterministic candidate filtering.
+
+The search is served by yt-dlp and the metadata by the Data API's `videos.list`, because
+each endpoint is the only one that can do its half. `search.list` has a separate daily
+allowance of roughly 100 calls — small enough that it, not the model, was the ceiling on how
+many games a day could be discovered — while `videos.list` costs 1 of 10 000 units and is
+the only source of the category, full description and privacy fields the filter needs.
+yt-dlp's flat search returns neither the category nor an untruncated description, so it
+cannot replace the hydration step, and does not need to.
+"""
 
 import html
 import re
+import urllib.parse
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
@@ -11,6 +22,13 @@ import httpx
 from app.config import settings
 
 YOUTUBE_BASE_URL = "https://www.googleapis.com/youtube/v3"
+# YouTube's "sort by view count" search filter. The requirement is the most popular video
+# among the suitable ones, and a relevance-ordered page does not contain it: ordered by
+# relevance the pick for Creepshow fell from 24 743 views to 922, and for Mortal Shell II
+# from 325k to 193k. Sorting also makes a 50-result page worth asking for.
+VIEW_COUNT_SORT = "CAM%253D"
+# videos.list takes at most 50 ids per call and costs one unit either way.
+HYDRATION_BATCH = 50
 
 
 class YouTubeError(RuntimeError):
@@ -350,20 +368,35 @@ def _name_heads_a_segment(candidate_title: str, game_title: str) -> bool:
     for index, normalized in enumerate(segments[:AMBIGUOUS_NAME_MAX_SEGMENTS]):
         if not any(normalized == name or normalized.startswith(f"{name} ") for name in variants):
             continue
-        if index and _LEVEL_LABEL.search(segments[index - 1]):
+        if index and _is_level_labelled(segments, index):
             continue
         return True
     return False
 
 
+def _is_level_labelled(segments: list[str], index: int) -> bool:
+    """Is the name at `index` a chapter of something else rather than the game itself?
+
+    A counter on either side says so — "JUSANT - Chapter 1 - Daymark" and "Jusant - DAYMARK
+    - Chapter 1" are the same video named two ways. Only a name that does *not* lead the
+    title is judged this way: in "Slayblade - Part 1" the counter is this game's episode
+    number, which is exactly what a let's-play looks like.
+    """
+    neighbours = [segments[index - 1]]
+    if index + 1 < len(segments):
+        neighbours.append(segments[index + 1])
+    return any(_LEVEL_LABEL.search(segment) for segment in neighbours)
+
+
 class YouTubeClient:
-    """One search.list plus one batched videos.list for a game's complete candidate set."""
+    """yt-dlp for the result list, one batched videos.list per 50 for their metadata."""
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
         client: httpx.Client | None = None,
+        search_ids: Callable[[str, int], list[str]] | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.google_cloud_api_key
         if not self.api_key:
@@ -374,47 +407,35 @@ class YouTubeClient:
             headers={"Accept": "application/json"},
         )
         self._owns_client = client is None
+        self._search_ids = search_ids or search_video_ids
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
 
     def search_game(self, title: str) -> YouTubeSearchResult:
-        """Search exactly once, then hydrate all results in one metadata request."""
+        """Search once, then hydrate every result before judging any of it."""
         query = build_search_query(title)
-        payload = self._get(
-            "/search",
-            params={
-                "part": "snippet",
-                "type": "video",
-                "q": query,
-                "order": "viewCount",
-                "maxResults": settings.youtube_search_max_results,
-                "videoEmbeddable": "true",
-                "videoSyndicated": "true",
-                "safeSearch": "none",
-                "key": self.api_key,
-            },
-        )
-        video_ids = list(
-            dict.fromkeys(
-                str(item.get("id", {}).get("videoId"))
-                for item in payload.get("items", [])
-                if item.get("id", {}).get("videoId")
-            )
-        )
+        video_ids = self._search_ids(query, settings.youtube_search_max_results)
         if not video_ids:
             return YouTubeSearchResult(query=query, candidates=[])
 
-        metadata = self._get(
-            "/videos",
-            params={
-                "part": "snippet,contentDetails,statistics,status",
-                "id": ",".join(video_ids),
-                "maxResults": len(video_ids),
-                "key": self.api_key,
-            },
-        )
+        candidates: list[VideoCandidate] = []
+        for start in range(0, len(video_ids), HYDRATION_BATCH):
+            batch = video_ids[start : start + HYDRATION_BATCH]
+            metadata = self._get(
+                "/videos",
+                params={
+                    "part": "snippet,contentDetails,statistics,status",
+                    "id": ",".join(batch),
+                    "maxResults": HYDRATION_BATCH,
+                    "key": self.api_key,
+                },
+            )
+            candidates.extend(self._candidates(metadata, title))
+        return YouTubeSearchResult(query=query, candidates=candidates)
+
+    def _candidates(self, metadata: dict[str, Any], title: str) -> list[VideoCandidate]:
         candidates = []
         for item in metadata.get("items", []):
             status = item.get("status") or {}
@@ -424,9 +445,10 @@ class YouTubeClient:
             ):
                 continue
             snippet = item.get("snippet") or {}
+            video_id = str(item["id"])
             candidate = VideoCandidate(
-                video_id=str(item["id"]),
-                url=f"https://www.youtube.com/watch?v={item['id']}",
+                video_id=video_id,
+                url=f"https://www.youtube.com/watch?v={video_id}",
                 title=html.unescape(str(snippet.get("title") or "")),
                 channel_id=snippet.get("channelId"),
                 channel_title=html.unescape(str(snippet.get("channelTitle") or "")) or None,
@@ -440,7 +462,7 @@ class YouTubeClient:
             )
             candidate.rejection_reason = candidate_rejection_reason(candidate, title)
             candidates.append(candidate)
-        return YouTubeSearchResult(query=query, candidates=candidates)
+        return candidates
 
     def _get(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -459,6 +481,44 @@ class YouTubeClient:
         if response.status_code == 429 or response.status_code >= 500:
             raise YouTubeTemporaryError(detail)
         raise YouTubeError(detail)
+
+
+def search_video_ids(query: str, limit: int) -> list[str]:
+    """Run one view-count-ordered YouTube search through yt-dlp and return its video ids.
+
+    `extract_flat` keeps this to the search page itself: no per-video extraction, no media,
+    no cookies and no account. Measured from the container at about two seconds a search.
+    """
+    # Imported here so the web process never pays for yt-dlp's import cost.
+    import yt_dlp
+    from yt_dlp.utils import DownloadError, ExtractorError
+
+    url = (
+        "https://www.youtube.com/results?search_query="
+        + urllib.parse.quote(query)
+        + f"&sp={VIEW_COUNT_SORT}"
+    )
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": "in_playlist",
+        "playlistend": limit,
+        "socket_timeout": settings.crawl_request_timeout_seconds,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(url, download=False)
+    except (DownloadError, ExtractorError) as exc:
+        raise YouTubeTemporaryError(f"yt-dlp search failed: {exc}") from exc
+    except Exception as exc:  # an extractor surprise must not reach the crawler
+        raise YouTubeTemporaryError(f"yt-dlp search crashed: {exc}") from exc
+    entries = (info or {}).get("entries") or []
+    return list(
+        dict.fromkeys(
+            str(entry["id"]) for entry in entries if isinstance(entry, dict) and entry.get("id")
+        )
+    )
 
 
 def parse_iso_duration(value: str) -> int:

@@ -124,13 +124,30 @@ Web and worker share configuration and models but no process memory.
   `no_candidate`, provider/quota failures, unavailable sources, `no_transcript` and
   `no_useful_commentary`, plus the complete candidate cache and attempted video IDs. Do not
   replace this with in-memory retry state or search again while `next_retry_at` is ahead.
-- Discovery makes exactly one popularity-ordered `search.list` call and one batched
-  `videos.list` call per search, and asks for the full 50 results — one search costs the
-  same at any depth. It does not use `videoDuration`. Candidates are filtered after metadata
-  hydration, then the eligible candidate with the highest `viewCount` wins. Eligibility is a
-  yes/no test, never a score: the most-viewed survivor is the answer, so a "quality" ranking
-  would have nowhere to live. A failed/silent source advances through cached candidates
-  before another search is allowed.
+- **The search is yt-dlp; the metadata is `videos.list`.** Each does the half only it can.
+  `search.list` has its own daily allowance of roughly 100 calls, which was the real ceiling
+  on how many games a day could be discovered — it was exhausted during one afternoon of
+  filter work while `videos.list` kept answering 200. yt-dlp has no such ceiling, so the
+  per-run search cap is gone. But yt-dlp's flat search returns no `categoryId` and a
+  description truncated to ~150 characters, and the filter needs both, so hydration stays on
+  `videos.list`: 1 unit of 10 000 per 50 videos, which no realistic backlog can exhaust.
+- Discovery makes one search and one `videos.list` per 50 results, asking for the full 50 —
+  one search page costs the same at any depth. It does not use `videoDuration`. Candidates
+  are filtered after hydration, then the eligible candidate with the highest `viewCount`
+  wins. Eligibility is a yes/no test, never a score: the most-viewed survivor is the answer,
+  so a "quality" ranking would have nowhere to live. A failed/silent source advances through
+  cached candidates before another search is allowed.
+- The search URL carries `sp=CAM%253D`, YouTube's sort-by-view-count filter. This is not a
+  detail: `ytsearch:` orders by relevance, and a relevance-ordered page does not contain the
+  most-viewed suitable video. Measured across the sample, relevance order picked a 922-view
+  Creepshow video over a 24 743-view one and a 193k Mortal Shell II over a 325k. Sorted
+  order picked the most-viewed eligible video for 22 of 30 games against the Data API's 12.
+  Sorting does cost some depth on obscure games (Suncroft returned 17 rows on relevance and
+  0 when sorted); that was measured and changed no outcome, since none of those rows was
+  eligible. Do not swap the sort back without re-measuring both.
+- The Data API is not kept as a search fallback. It could only serve ~100 searches a day,
+  which cannot sustain the feature on its own, and a second search path would need its own
+  error mapping for no gain: a failed yt-dlp search is already a retryable `youtube_error`.
 - **YouTube loses recall as a quoted OR-chain grows.** Measured against one game: 1 branch
   returned 22-25 results, 3 returned 25, 4 returned 7, and the 7 branches this project used
   to send returned **1**. That single fact caused most `no_candidate` results — the search
@@ -164,6 +181,11 @@ Web and worker share configuration and models but no process memory.
   text-only rule separates them. `topicCategories` was checked and is genre-level only, so
   it cannot help. Two of thirty sampled games still pick the wrong game this way; prefer
   leaving it than adding heuristics that cost the twenty-five that work.
+- The chapter-counter test is symmetric: a counter on *either* side of an ambiguous name
+  marks it as a level label, because "JUSANT - Chapter 1 - Daymark" and "Jusant - DAYMARK
+  (Chapter 1)" are the same video named two ways. It only applies to a name that does not
+  lead the title — in "Slayblade - Part 1" the counter is this game's episode number, which
+  is exactly what a let's-play looks like.
 - **The main path is subtitles, not video.** `app/collectors/transcript.py` uses yt-dlp with
   `download=False` to read the player response, then fetches the `json3` timed-text track
   over plain HTTP. No video or audio stream is ever downloaded and no temporary file is
@@ -209,12 +231,13 @@ Web and worker share configuration and models but no process memory.
   filter: an unreviewed game still comes up once the reviewed backlog is clear. Without it a
   catalogue that is ~85% brand-new indie releases spends every run on titles nobody has
   published a let's-play of.
-- `youtube.max_searches_per_run` (3) exists because `search.list` draws on its own daily
-  allowance of roughly **100 calls**, separate from the units the other endpoints spend —
-  confirmed by exhausting it during filter work. It is the scarce resource here, not the
-  10 000-unit figure quoted earlier in this file's history. Three per run keeps 24 hourly
-  runs at 72 a day. Hitting the cap yields the non-persisted `search_budget` outcome, which
-  leaves the game pending for the next run instead of burning its retry window.
+- There is no per-run search cap any more, and `youtube.max_searches_per_run` and the
+  `search_budget` outcome are gone with it. The cap existed only to ration `search.list`.
+  What now bounds a run is `youtube.max_games_per_run`, which is about work per run rather
+  than a provider allowance.
+- Measured from the container: 30 consecutive searches, 0 failures, ~2.0 s per game
+  including hydration. No cookies, no account, no per-video extraction — `extract_flat`
+  reads the search page only. Rate limiting never appeared at this volume; a run does five.
 - `GOOGLE_CLOUD_API_KEY` and `GEMINI_API_KEY` are environment-only. YouTube feature/model/
   fragment/density/batch tunables use `app/services/app_settings.py`; no YouTube failure may
   fail the crawl or stop ordinary Gemini enrichment.
@@ -257,9 +280,10 @@ rejection-reason breakdown are in the YouTube section above. Next work, in the o
   `status.replace('_', ' ')` rendering on the detail page prints raw status slugs at the user.
   Decide whether statuses get a display map or the UI stops showing them before translating.
 - **Discovery accuracy for one-word names.** Rewritten and measured on a 30-game sample from
-  the live catalogue: 27 now select a video (was 20), 0 videos are eligible for more than one
-  game, and the surviving errors are the *Gallipoli* / *Superposition* class described above.
-  Anything further needs a game-entity vocabulary, not another keyword.
+  the live catalogue, re-run through the shipped code in the container: 27 select a video
+  (was 20), 0 videos are eligible for more than one game, and the surviving errors are the
+  *Gallipoli* / *Superposition* class described above. Anything further needs a game-entity
+  vocabulary, not another keyword.
 - **Prompt-version backlog.** `PROMPT_VERSION` and `YOUTUBE_PROMPT_VERSION` were both bumped, so
   every stored summary is stale and regenerates at `ai.max_games_per_run` (20) per run; a ~190
   game catalogue takes about ten runs to come back. That is by design — do not bulk-edit rows.
