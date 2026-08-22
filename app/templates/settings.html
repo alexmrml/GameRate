@@ -1,47 +1,67 @@
 {% extends "base.html" %}
-{% block title %}Settings · {{ app_name }}{% endblock %}
-{% block content %}
-  <div class="page-heading"><div><h1>Settings</h1><p class="muted">Runtime application values stored in PostgreSQL.</p></div></div>
-  <section class="section">
-    <h2>AI and YouTube enrichment</h2>
-    <p class="muted">These control when the worker calls Gemini and YouTube. The environment supplies the default; saving a value with the same key below overrides it without a restart. Provider API keys are environment-only and never shown here.</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Key</th><th>In force</th><th>Default (env)</th><th>Override</th><th>What it does</th></tr></thead>
-        <tbody>
-          {% for item in tunables %}
-            <tr>
-              <td><code>{{ item.key }}</code></td>
-              <td><strong>{{ item.effective }}</strong></td>
-              <td>{{ item.default }}</td>
-              <td>{{ item.override if item.override is not none else '—' }}</td>
-              <td class="muted">{{ item.description }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+{% block title %}Настройки · {{ app_name }}{% endblock %}
+{% macro setting_row(item) %}
+  <form class="setting-row" method="post" action="/settings">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="key" value="{{ item.key }}">
+    <label for="setting-{{ item.key|replace('.', '-') }}">
+      <strong>{{ item.label }}</strong>
+      <span>{{ item.description }}</span>
+    </label>
+    <div class="setting-control">
+      {% if item.kind == 'bool' %}
+        <select id="setting-{{ item.key|replace('.', '-') }}" name="value">
+          <option value="true" {% if item.effective %}selected{% endif %}>Включено</option>
+          <option value="false" {% if not item.effective %}selected{% endif %}>Выключено</option>
+        </select>
+      {% elif item.kind in ('int', 'float') %}
+        <div class="input-with-unit">
+          <input id="setting-{{ item.key|replace('.', '-') }}" type="number" name="value" value="{{ item.effective }}"
+                 {% if item.minimum is not none %}min="{{ item.minimum }}"{% endif %}
+                 {% if item.step is not none %}step="{{ item.step }}"{% endif %} required>
+          {% if item.unit %}<span>{{ item.unit }}</span>{% endif %}
+        </div>
+      {% else %}
+        <input id="setting-{{ item.key|replace('.', '-') }}" name="value" value="{{ item.effective }}" required>
+      {% endif %}
     </div>
-  </section>
+    <button class="button button-small" type="submit">Сохранить</button>
+  </form>
+{% endmacro %}
+{% block content %}
+  <header class="page-heading settings-heading">
+    <div>
+      <h1>Настройки обработки</h1>
+      <p class="page-intro">Параметры применяются к следующим запускам без перезапуска сервиса.</p>
+    </div>
+  </header>
 
-  <div class="settings-layout">
-    <section class="section">
-      <h2>Stored values</h2>
-      <div class="definition-list">
-        {% for item in settings %}
-          <div><dt>{{ item.key }}</dt><dd><code>{{ item.value }}</code></dd><span class="muted">{{ item.updated_at.strftime('%Y-%m-%d %H:%M') }}</span></div>
-        {% else %}<p class="empty-copy">No database-backed settings yet.</p>{% endfor %}
+  {% if saved %}<div class="notice notice-success" role="status">Настройка сохранена и уже действует.</div>{% endif %}
+
+  <div class="settings-container">
+    <section class="settings-group">
+      <div class="settings-group-heading">
+        <span class="settings-index">01</span>
+        <div><h2>Сводки и теги</h2><p>Как AI обрабатывает собранные отзывы и обновляет аналитику игр.</p></div>
+      </div>
+      <div class="settings-list">
+        {% for item in tunables if item.group == 'ai' %}{{ setting_row(item) }}{% endfor %}
       </div>
     </section>
-    <section class="section form-section">
-      <h2>Add or update</h2>
-      <form class="stack" method="post" action="/settings">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label><span>Key</span><input name="key" placeholder="ai.min_refresh_interval_hours" required maxlength="120"></label>
-        <label><span>JSON value or text</span><textarea name="value" rows="5" placeholder="true" required></textarea></label>
-        <button class="button button-primary" type="submit">Save setting</button>
-      </form>
-      <p class="form-help">Environment-owned values such as APP_TIMEZONE remain read-only here. Current timezone: <code>{{ app_timezone }}</code>.</p>
+
+    <section class="settings-group">
+      <div class="settings-group-heading">
+        <span class="settings-index">02</span>
+        <div><h2>YouTube-летсплеи</h2><p>Поиск источников, чтение субтитров и резервный анализ видео.</p></div>
+      </div>
+      <div class="settings-list">
+        {% for item in tunables if item.group == 'youtube' %}{{ setting_row(item) }}{% endfor %}
+      </div>
     </section>
+
+    <aside class="system-note">
+      <strong>Системные параметры</strong>
+      <p>Ключи провайдеров, подключение к базе и параметры развертывания управляются вне интерфейса. Часовой пояс приложения: <span class="technical">{{ app_timezone }}</span>.</p>
+    </aside>
   </div>
 {% endblock %}
-

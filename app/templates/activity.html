@@ -1,44 +1,53 @@
 {% extends "base.html" %}
-{% block title %}Activity · {{ app_name }}{% endblock %}
+{% block title %}Обработка · {{ app_name }}{% endblock %}
 {% block content %}
-  <div class="page-heading">
-    <div><h1>Activity</h1><p class="muted">Manual processing runs and worker availability.</p></div>
+  <header class="page-heading activity-heading">
+    <div>
+      <h1>Обработка данных</h1>
+      <p class="page-intro">Состояние воркеров и журнал запусков сбора и обогащения данных.</p>
+    </div>
     <form method="post" action="/activity/runs">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="button button-primary" type="submit">Start processing</button>
+      <button class="button button-primary" type="submit">Запустить обработку</button>
     </form>
-  </div>
+  </header>
 
-  <section class="section">
-    <div class="section-heading"><h2>Workers</h2><span class="live-indicator" id="live-state">Connecting live status…</span></div>
+  <section class="section worker-section">
+    <div class="section-heading">
+      <div><h2>Воркеры</h2><p class="section-note">Последний heartbeat и текущий запуск</p></div>
+      <span class="live-indicator" id="live-state">Подключение к потоку…</span>
+    </div>
     <div class="worker-list" id="workers">
       {% for worker in workers %}
-        <div class="worker-row"><strong>{{ worker.worker_id }}</strong><span>Last heartbeat {{ worker.last_seen_at.strftime('%Y-%m-%d %H:%M:%S') }}</span><span>{{ worker.current_run_id or 'Idle' }}</span></div>
-      {% else %}<p class="empty-copy">No worker heartbeat received.</p>{% endfor %}
+        <div class="worker-row">
+          <strong>{{ worker.worker_id }}</strong>
+          <span><small>Последний heartbeat</small>{{ worker.last_seen_at.strftime('%d.%m.%Y %H:%M:%S') }} UTC</span>
+          <span><small>Текущий запуск</small>{{ worker.current_run_id or 'Свободен' }}</span>
+        </div>
+      {% else %}<p class="empty-copy">Heartbeat от воркеров ещё не поступал.</p>{% endfor %}
     </div>
   </section>
 
-  <section class="section">
-    <h2>Processing runs</h2>
-    <div class="table-wrap">
-      <table id="runs-table">
-        <thead><tr><th>Created</th><th>Trigger</th><th>Status</th><th>Progress</th><th>Current game</th><th>Worker</th><th>Message</th></tr></thead>
+  <section class="section runs-section">
+    <div class="section-heading"><div><h2>Журнал запусков</h2><p class="section-note">Последние 100 запусков, новые сверху</p></div></div>
+    <div class="table-wrap activity-table-wrap">
+      <table class="activity-table" id="runs-table">
+        <thead><tr><th>Создан</th><th>Источник</th><th>Статус</th><th>Прогресс</th><th>Текущая игра</th><th>Воркер</th><th>Сообщение</th></tr></thead>
         <tbody>
           {% for run in runs %}
             <tr data-run-id="{{ run.id }}">
-              <td class="nowrap">{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-              <td>{{ run.trigger.value }}</td>
-              <td><span class="status status-{{ run.status.value }}" data-field="status">{{ run.status.value }}</span></td>
-              <td class="nowrap" data-field="progress">{{ run.progress_current }}{% if run.progress_total %} / {{ run.progress_total }}{% endif %}</td>
+              <td class="nowrap technical">{{ run.created_at.strftime('%d.%m.%Y %H:%M:%S') }}</td>
+              <td>{{ run_trigger_labels.get(run.trigger.value, run.trigger.value) }}</td>
+              <td><span class="status status-{{ run.status.value }}" data-field="status">{{ run_status_labels.get(run.status.value, run.status.value) }}</span></td>
+              <td class="nowrap technical" data-field="progress">{{ run.progress_current }}{% if run.progress_total %} / {{ run.progress_total }}{% endif %}</td>
               <td data-field="current_game">{{ run.current_game.title if run.current_game else '—' }}</td>
-              <td data-field="worker_id">{{ run.worker_id or '—' }}</td>
-              <td data-field="message">{{ run.message or '—' }}</td>
+              <td class="technical" data-field="worker_id">{{ run.worker_id or '—' }}</td>
+              <td class="run-message" data-field="message">{{ format_run_message(run.message) }}</td>
             </tr>
-          {% else %}<tr><td colspan="7" class="empty-state">No processing runs yet.</td></tr>{% endfor %}
+          {% else %}<tr><td colspan="7" class="empty-state"><strong>Запусков пока нет</strong><span>Первый запуск можно создать кнопкой выше.</span></td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
   </section>
-  <script>window.GameRateActivity = true;</script>
+  <script>window.GameRateActivity = {statusLabels: {{ run_status_labels | tojson }}};</script>
 {% endblock %}
-

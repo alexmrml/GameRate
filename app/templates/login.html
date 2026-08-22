@@ -1,30 +1,32 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sign in · {{ app_name }}</title>
+    <title>Вход · {{ app_name }}</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
   </head>
   <body class="auth-page">
     <main class="auth-panel">
-      <a class="brand auth-brand" href="/">{{ app_name }}</a>
-      <h1>Sign in</h1>
-      <p class="muted">Use the account created by an administrator.</p>
+      <a class="brand-lockup auth-brand" href="/">
+        <span class="brand">{{ app_name }}</span>
+        <span class="brand-note">игровая аналитика</span>
+      </a>
+      <h1>Вход в систему</h1>
+      <p class="muted">Используйте учётную запись, созданную администратором.</p>
       {% if error %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endif %}
-      <form class="stack" method="post" action="/login">
+      <form class="stack auth-form" method="post" action="/login">
         <input type="hidden" name="next" value="{{ next }}">
         <label>
-          <span>Username</span>
+          <span>Имя пользователя</span>
           <input name="username" autocomplete="username" required autofocus>
         </label>
         <label>
-          <span>Password</span>
+          <span>Пароль</span>
           <input type="password" name="password" autocomplete="current-password" required>
         </label>
-        <button class="button button-primary" type="submit">Sign in</button>
+        <button class="button button-primary" type="submit">Войти</button>
       </form>
     </main>
   </body>
 </html>
-

@@ -23,7 +23,12 @@ class TunableSetting:
     key: str
     kind: type
     default_attribute: str
+    label: str
+    group: str
     description: str
+    unit: str | None = None
+    minimum: float | None = None
+    step: float | None = None
 
     def default(self) -> Any:
         return getattr(settings, self.default_attribute)
@@ -31,80 +36,143 @@ class TunableSetting:
 
 TUNABLES: tuple[TunableSetting, ...] = (
     TunableSetting(
-        "ai.enabled", bool, "ai_enabled", "Run Gemini enrichment as part of processing runs"
+        "ai.enabled",
+        bool,
+        "ai_enabled",
+        "Обогащать данные с помощью AI",
+        "ai",
+        "Создавать сводки по отзывам и аналитические теги после сбора данных.",
     ),
-    TunableSetting("ai.model", str, "gemini_model", "Gemini model used for enrichment"),
+    TunableSetting(
+        "ai.model",
+        str,
+        "gemini_model",
+        "Модель для сводок",
+        "ai",
+        "Модель Gemini, которая анализирует отзывы и описание игры.",
+    ),
     TunableSetting(
         "ai.min_reviews",
         int,
         "ai_min_reviews",
-        "Reviews an audience needs before it is summarized at all",
+        "Минимум отзывов для сводки",
+        "ai",
+        "Сколько отзывов одной аудитории нужно собрать до первого анализа.",
+        "отзывов",
+        1,
+        1,
     ),
     TunableSetting(
         "ai.max_games_per_run",
         int,
         "ai_max_games_per_run",
-        "Upper bound on games enriched in one run",
+        "Игр с AI-анализом за запуск",
+        "ai",
+        "Ограничивает объём AI-обработки в одном цикле.",
+        "игр",
+        0,
+        1,
     ),
     TunableSetting(
         "ai.refresh_min_new_reviews",
         int,
         "ai_refresh_min_new_reviews",
-        "New reviews required before an existing summary is regenerated",
+        "Новых отзывов для обновления",
+        "ai",
+        "Абсолютный порог роста выборки перед повторным созданием сводки.",
+        "отзывов",
+        1,
+        1,
     ),
     TunableSetting(
         "ai.refresh_min_growth",
         float,
         "ai_refresh_min_growth",
-        "Relative growth (0.25 = +25%) required alongside the absolute threshold",
+        "Относительный рост выборки",
+        "ai",
+        "Дополнительный порог роста: 0.25 означает увеличение на 25%.",
+        "доля",
+        0,
+        0.05,
     ),
     TunableSetting(
         "ai.min_refresh_interval_hours",
         int,
         "ai_min_refresh_interval_hours",
-        "Quiet period after a summary before it may be regenerated",
+        "Пауза между обновлениями",
+        "ai",
+        "Минимальное время после создания сводки до следующего обновления.",
+        "часов",
+        0,
+        1,
     ),
     TunableSetting(
         "youtube.enabled",
         bool,
         "youtube_analysis_enabled",
-        "Find and analyze a YouTube let's-play for games without a useful result",
+        "Анализировать летсплеи",
+        "youtube",
+        "Искать YouTube-летсплеи и извлекать мнение автора из финального фрагмента.",
     ),
     TunableSetting(
         "youtube.model",
         str,
         "youtube_analysis_model",
-        "Model that reads the subtitle fragment of a let's-play",
+        "Модель для субтитров",
+        "youtube",
+        "Текстовая модель, которая читает выбранный фрагмент субтитров.",
     ),
     TunableSetting(
         "youtube.video_fallback_model",
         str,
         "youtube_video_fallback_model",
-        "Multimodal Gemini model used only when a video publishes no usable subtitles",
+        "Резервная модель для видео",
+        "youtube",
+        "Мультимодальная модель для источников без пригодных субтитров.",
     ),
     TunableSetting(
         "youtube.fragment_minutes",
         int,
         "youtube_analysis_fragment_minutes",
-        "Length of the analyzed fragment near the end of the video, in minutes",
+        "Длина фрагмента",
+        "youtube",
+        "Продолжительность анализируемого фрагмента ближе к концу видео.",
+        "минут",
+        1,
+        1,
     ),
     TunableSetting(
         "youtube.min_words_per_minute",
         int,
         "youtube_transcript_min_words_per_minute",
-        "Speech rate a fragment must hold to count as commentary rather than silence",
+        "Минимальная плотность речи",
+        "youtube",
+        "Фрагменты с меньшей плотностью считаются тишиной, титрами или меню.",
+        "слов/мин",
+        1,
+        1,
     ),
     TunableSetting(
         "youtube.max_games_per_run",
         int,
         "youtube_analysis_max_games_per_run",
-        "Maximum games searched or analyzed per processing run",
+        "Игр с YouTube-анализом за запуск",
+        "youtube",
+        "Сколько игр из очереди можно обработать за один цикл.",
+        "игр",
+        0,
+        1,
     ),
     TunableSetting(
         "youtube.max_video_fallbacks_per_run",
         int,
         "youtube_max_video_fallbacks_per_run",
-        "Multimodal video calls per run, for games whose sources have no subtitles",
+        "Резервных видеоанализов за запуск",
+        "youtube",
+        "Ограничение дорогих вызовов модели для видео без субтитров.",
+        "вызовов",
+        0,
+        1,
     ),
 )
 
@@ -134,6 +202,17 @@ def get_setting(db: Session, key: str) -> Any:
         return tunable.default()
 
 
+def parse_setting_value(key: str, value: str) -> Any:
+    """Validate a value submitted by the user-facing settings form."""
+    tunable = TUNABLES_BY_KEY.get(key)
+    if tunable is None:
+        raise KeyError(key)
+    parsed = _coerce(value, tunable.kind)
+    if tunable.minimum is not None and parsed < tunable.minimum:
+        raise ValueError(f"value must be at least {tunable.minimum}")
+    return parsed
+
+
 def effective_settings(db: Session) -> dict[str, Any]:
     return {tunable.key: get_setting(db, tunable.key) for tunable in TUNABLES}
 
@@ -150,7 +229,13 @@ def describe_settings(db: Session) -> list[dict[str, Any]]:
         described.append(
             {
                 "key": tunable.key,
+                "label": tunable.label,
+                "group": tunable.group,
                 "description": tunable.description,
+                "kind": tunable.kind.__name__,
+                "unit": tunable.unit,
+                "minimum": tunable.minimum,
+                "step": tunable.step,
                 "default": tunable.default(),
                 "override": row.value if row is not None else None,
                 "effective": get_setting(db, tunable.key),

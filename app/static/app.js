@@ -5,12 +5,12 @@
   const source = new EventSource("/activity/events");
 
   source.addEventListener("open", () => {
-    liveState.textContent = "Live";
+    liveState.textContent = "Поток подключён";
     liveState.classList.add("is-live");
   });
 
   source.addEventListener("error", () => {
-    liveState.textContent = "Reconnecting…";
+    liveState.textContent = "Переподключение…";
     liveState.classList.remove("is-live");
   });
 
@@ -28,7 +28,7 @@
         continue;
       }
       const status = row.querySelector('[data-field="status"]');
-      status.textContent = run.status;
+      status.textContent = window.GameRateActivity.statusLabels[run.status] || run.status;
       status.className = `status status-${run.status}`;
       const progress =
         run.progress_total > 0
@@ -41,4 +41,3 @@
     }
   });
 })();
-

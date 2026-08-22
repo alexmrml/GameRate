@@ -94,7 +94,7 @@ def test_game_detail_page(authenticated_client: TestClient) -> None:
     response = authenticated_client.get(f"/games/{game_id}")
     assert response.status_code == 200
     assert "Detail Game" in response.text
-    assert "Platform scores" in response.text
+    assert "Оценки по платформам" in response.text
 
 
 def test_snapshot_is_stored_and_rendered_on_the_detail_page(
@@ -155,12 +155,12 @@ def test_catalogue_shows_the_lead_platform_score_and_release_date(
     response = authenticated_client.get("/games")
     assert response.status_code == 200
     body = response.text
-    assert "2026-05-04" in body
+    assert "04.05.2026" in body
     # PS5 has the most critic reviews, so its scores represent the game. The assertions
     # match rendered cells, because the page also carries a random CSRF token.
-    assert "<strong>74</strong>" in body
-    assert "<strong>6.2</strong>" in body
-    assert "<strong>91</strong>" not in body
+    assert '<strong class="score-value">74</strong>' in body
+    assert '<strong class="score-value">6.2</strong>' in body
+    assert '<strong class="score-value">91</strong>' not in body
     assert "Updated" not in body
 
 
@@ -187,7 +187,7 @@ def test_sorting_uses_the_lead_platform_score_and_keeps_unrated_last(
     order = [body.index(title) for title in ("Mid Lead", "High Lead", "Unrated Game")]
     assert order == sorted(order)
     # Nothing invents a score for the unrated game.
-    assert "not rated" in body
+    assert "нет оценки" in body
     assert ">0<" not in body
 
 
@@ -223,11 +223,11 @@ def test_detail_page_shows_summaries_tags_and_similar_games(
     assert "Critics enjoyed the pacing." in body
     assert "Tight level design" in body
     assert "Short campaign" in body
-    assert "From 7 critic reviews" in body
-    assert "No player reviews collected yet." in body
+    assert "Источников: 7 · критики" in body
+    assert "Отзывы этой аудитории пока не собраны." in body
     assert "Hero B" in body
     assert f"/games/{second.id}" in body
-    assert "Shared gameplay: platforming" in body
+    assert "Общая механика: platforming" in body
 
 
 def test_detail_page_shows_youtube_source_and_speech_grounded_findings(
@@ -262,11 +262,11 @@ def test_detail_page_shows_youtube_source_and_speech_grounded_findings(
         db.commit()
 
     body = authenticated_client.get(f"/games/{game.id}").text
-    assert "Let&#39;s-play perspective" in body or "Let's-play perspective" in body
+    assert "Мнение автора летсплея" in body
     assert "Thoughtful Creator" in body
-    assert "1,234,567 views" in body
-    assert "Watch on YouTube" in body
+    assert "1 234 567 просмотров" in body
+    assert "Смотреть на YouTube" in body
     assert "The creator enjoys combat" in body
     assert "Combat reacts quickly" in body
     assert "Checkpoints repeat too much" in body
-    assert "Speech evidence from the fragment" in body
+    assert "Речевая основа анализа" in body

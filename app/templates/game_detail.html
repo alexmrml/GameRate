@@ -1,165 +1,226 @@
 {% extends "base.html" %}
 {% block title %}{{ game.title }} · {{ app_name }}{% endblock %}
-{% macro summary_block(summary, audience, collected) %}
+{% macro summary_block(summary, audience_label, collected) %}
   {% if summary %}
-    <p class="verdict">{{ summary.verdict }}</p>
-    <p>{{ summary.summary }}</p>
-    {% if summary.positives %}
-      <h4>What they liked</h4>
-      <ul class="insight-list">{% for item in summary.positives %}<li class="liked">{{ item }}</li>{% endfor %}</ul>
-    {% endif %}
-    {% if summary.negatives %}
-      <h4>What they disliked</h4>
-      <ul class="insight-list">{% for item in summary.negatives %}<li class="disliked">{{ item }}</li>{% endfor %}</ul>
-    {% endif %}
-    <span class="muted">From {{ summary.source_count }} {{ audience }} reviews · {{ summary.model_name }} · {{ summary.generated_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+    {% if summary.verdict %}<p class="verdict">{{ summary.verdict }}</p>{% endif %}
+    <p class="summary-copy">{{ summary.summary }}</p>
+    <div class="insight-columns">
+      {% if summary.positives %}
+        <div>
+          <h4>Отмечают</h4>
+          <ul class="insight-list">{% for item in summary.positives %}<li class="liked">{{ item }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
+      {% if summary.negatives %}
+        <div>
+          <h4>Критикуют</h4>
+          <ul class="insight-list">{% for item in summary.negatives %}<li class="disliked">{{ item }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
+    </div>
+    <span class="summary-meta">Источников: {{ summary.source_count }} · {{ audience_label }} · {{ summary.model_name }} · {{ summary.generated_at.strftime('%d.%m.%Y %H:%M') }} UTC</span>
   {% elif collected %}
-    <p class="empty-copy">{{ collected }} {{ audience }} review{{ '' if collected == 1 else 's' }} collected — not yet enough for a summary.</p>
+    <p class="empty-copy">Собрано отзывов: {{ collected }}. Данных пока недостаточно для сводки.</p>
   {% else %}
-    <p class="empty-copy">No {{ audience }} reviews collected yet.</p>
+    <p class="empty-copy">Отзывы этой аудитории пока не собраны.</p>
   {% endif %}
 {% endmacro %}
 {% block content %}
-  <a class="back-link" href="/games">Back to games</a>
-  <div class="page-heading detail-heading">
+  <a class="back-link" href="/games">К каталогу</a>
+
+  <header class="detail-header">
     <div class="detail-identity">
-      {% if game.cover_image_url %}<img class="cover cover-large" src="{{ game.cover_image_url }}" alt="{{ game.title }} cover" loading="lazy">{% endif %}
-      <div>
+      {% if game.cover_image_url %}
+        <img class="cover cover-large" src="{{ game.cover_image_url }}" alt="Обложка {{ game.title }}" loading="lazy">
+      {% endif %}
+      <div class="detail-title-block">
         <h1>{{ game.title }}</h1>
-        <p class="muted">
-          {% if game.release_date %}Released {{ game.release_date }} · {% endif %}
-          {% if game.developer %}{{ game.developer }}{% endif %}
-          {% if lead %} · Lead platform {{ lead.platform.name }}{% endif %}
-        </p>
-        <div class="badge-list">
-          {% for genre in game.genres %}<span class="chip chip-genre">{{ genre.name }}</span>{% endfor %}
-          {% for facet, tags in tags_by_facet.items() %}{% for tag in tags %}<span class="chip" title="{{ facet }}">{{ tag.name }}</span>{% endfor %}{% endfor %}
+        <dl class="identity-facts">
+          {% if game.release_date %}<div><dt>Релиз</dt><dd>{{ game.release_date.strftime('%d.%m.%Y') }}</dd></div>{% endif %}
+          {% if game.developer %}<div><dt>Разработчик</dt><dd>{{ game.developer }}</dd></div>{% endif %}
+          {% if game.publisher %}<div><dt>Издатель</dt><dd>{{ game.publisher }}</dd></div>{% endif %}
+        </dl>
+        {% if game.genres or game.tags %}
+          <div class="tag-block">
+            {% for genre in game.genres %}<span class="chip chip-genre">{{ genre.name }}</span>{% endfor %}
+            {% for facet, tags in tags_by_facet.items() %}{% for tag in tags %}<span class="chip" title="{{ facet }}">{{ tag.name }}</span>{% endfor %}{% endfor %}
+          </div>
+        {% endif %}
+        <div class="detail-actions">
+          {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Открыть в Metacritic</a>{% endif %}
+          {% if game.video_url %}<a class="button button-quiet" href="{{ game.video_url }}" rel="noreferrer">Трейлер</a>{% endif %}
         </div>
       </div>
     </div>
-    <div class="detail-actions">
-      {% if game.metacritic_url %}<a class="button" href="{{ game.metacritic_url }}" rel="noreferrer">Metacritic</a>{% endif %}
-      {% if game.video_url %}<a class="button button-quiet" href="{{ game.video_url }}" rel="noreferrer">Trailer</a>{% endif %}
+
+    <div class="headline-scores" aria-label="Оценки основной платформы">
+      <p class="score-context">
+        {% if lead %}Основная платформа <strong>{{ lead.platform.name }}</strong>{% else %}Основная платформа не определена{% endif %}
+      </p>
+      <div class="headline-score-grid">
+        <div>
+          <span>Metascore</span>
+          {% if lead and lead.metascore is not none %}<strong>{{ lead.metascore }}</strong>{% else %}<em>нет оценки</em>{% endif %}
+        </div>
+        <div>
+          <span>Userscore</span>
+          {% if lead and lead.userscore is not none %}<strong>{{ lead.userscore }}</strong>{% else %}<em>нет оценки</em>{% endif %}
+        </div>
+      </div>
     </div>
-  </div>
+  </header>
 
-  {% if game.description %}<p class="lead">{{ game.description }}</p>{% endif %}
+  {% if game.description %}
+    <section class="detail-description" aria-labelledby="description-heading">
+      <h2 id="description-heading">Об игре</h2>
+      <p>{{ game.description }}</p>
+    </section>
+  {% endif %}
 
-  <section class="section">
-    <h2>Platform scores</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Platform</th><th>Metascore</th><th>Userscore</th><th>Critic reviews</th><th>User ratings</th></tr></thead>
-        <tbody>
-          {% for item in game.platforms %}
-            <tr>
-              <td>{{ item.platform.name }}{% if lead and item.platform_id == lead.platform_id %} <span class="chip chip-small">lead</span>{% endif %}</td>
-              <td>{{ item.metascore if item.metascore is not none else 'not rated' }}</td>
-              <td>{{ item.userscore if item.userscore is not none else 'not rated' }}</td>
-              <td>{{ item.critic_review_count if item.critic_review_count is not none else '—' }}</td>
-              <td>{{ item.user_rating_count if item.user_rating_count is not none else '—' }}</td>
-            </tr>
-          {% else %}<tr><td colspan="5" class="empty-state">No platform scores yet.</td></tr>{% endfor %}
-        </tbody>
-      </table>
+  <section class="section analysis-section">
+    <div class="section-heading">
+      <div><h2>Сводка по отзывам</h2><p class="section-note">Мнения критиков и игроков анализируются раздельно</p></div>
+    </div>
+    <div class="summary-grid">
+      <article class="summary-panel">
+        <div class="summary-heading"><h3>Критики</h3><span>{{ critic_review_count }} отзывов</span></div>
+        {{ summary_block(critic_summary, 'критики', critic_review_count) }}
+      </article>
+      <article class="summary-panel">
+        <div class="summary-heading"><h3>Игроки</h3><span>{{ user_review_count }} отзывов</span></div>
+        {{ summary_block(user_summary, 'игроки', user_review_count) }}
+      </article>
     </div>
   </section>
 
-  <div class="two-column">
-    <section class="section">
-      <h2>What critics say</h2>
-      {{ summary_block(critic_summary, 'critic', critic_review_count) }}
-    </section>
-    <section class="section">
-      <h2>What players say</h2>
-      {{ summary_block(user_summary, 'player', user_review_count) }}
-    </section>
-  </div>
-
-  {% if game.youtube_analysis %}
-    {% set item = game.youtube_analysis %}
-    <section class="section youtube-analysis">
-      <h2>Let's-play perspective</h2>
+  <section class="section youtube-section">
+    <div class="section-heading">
+      <div><h2>Мнение автора летсплея</h2><p class="section-note">Отдельный взгляд по речи в финальной части прохождения</p></div>
+      {% if game.youtube_analysis %}<span class="analysis-status">{{ youtube_status_labels.get(game.youtube_analysis.status, game.youtube_analysis.status) }}</span>{% endif %}
+    </div>
+    {% if game.youtube_analysis %}
+      {% set item = game.youtube_analysis %}
       {% if item.video_url %}
-        <h3><a href="{{ item.video_url }}" rel="noreferrer">{{ item.video_title or item.video_id }}</a></h3>
-        <p class="youtube-meta muted">
-          {{ item.channel_title or 'Unknown channel' }}
-          {% if item.view_count is not none %} · {{ '{:,}'.format(item.view_count) }} views{% endif %}
-          {% if item.duration_seconds %} · {{ format_duration(item.duration_seconds) }}{% endif %}
-          {% if item.fragment_start_seconds is not none %} · analyzed {{ format_duration(item.fragment_start_seconds) }}–{{ format_duration(item.fragment_end_seconds) }}{% endif %}
-        </p>
-        <a class="button button-quiet" href="{{ item.video_url }}" rel="noreferrer">Watch on YouTube</a>
+        <div class="youtube-source">
+          <div>
+            <h3><a href="{{ item.video_url }}" rel="noreferrer">{{ item.video_title or item.video_id }}</a></h3>
+            <p class="youtube-meta">
+              {{ item.channel_title or 'Канал не указан' }}
+              {% if item.view_count is not none %} · {{ '{:,}'.format(item.view_count).replace(',', ' ') }} просмотров{% endif %}
+              {% if item.duration_seconds %} · {{ format_duration(item.duration_seconds) }}{% endif %}
+              {% if item.fragment_start_seconds is not none %} · фрагмент {{ format_duration(item.fragment_start_seconds) }}–{{ format_duration(item.fragment_end_seconds) }}{% endif %}
+            </p>
+          </div>
+          <a class="button button-small" href="{{ item.video_url }}" rel="noreferrer">Смотреть на YouTube</a>
+        </div>
       {% endif %}
       {% if item.status == 'success' %}
-        <p class="verdict">{{ item.summary }}</p>
+        <p class="youtube-summary">{{ item.summary }}</p>
         <div class="two-column youtube-findings">
           <div>
-            <h4>What the creator liked</h4>
-            <ul class="insight-list">{% for point in item.liked or [] %}<li class="liked">{{ point }}</li>{% else %}<li class="muted">No clear positive point in the fragment.</li>{% endfor %}</ul>
+            <h4>Что понравилось автору</h4>
+            <ul class="insight-list">{% for point in item.liked or [] %}<li class="liked">{{ point }}</li>{% else %}<li class="muted">Явных положительных тезисов во фрагменте нет.</li>{% endfor %}</ul>
           </div>
           <div>
-            <h4>What the creator disliked</h4>
-            <ul class="insight-list">{% for point in item.disliked or [] %}<li class="disliked">{{ point }}</li>{% else %}<li class="muted">No clear negative point in the fragment.</li>{% endfor %}</ul>
+            <h4>Что не понравилось автору</h4>
+            <ul class="insight-list">{% for point in item.disliked or [] %}<li class="disliked">{{ point }}</li>{% else %}<li class="muted">Явных отрицательных тезисов во фрагменте нет.</li>{% endfor %}</ul>
           </div>
         </div>
         {% if item.speech_transcript %}
           <details class="speech-evidence">
             <summary>
               {% if item.analysis_source == 'transcript' %}
-                Subtitles of the fragment{% if item.transcript_language %} ({{ item.transcript_language }}{% if item.transcript_is_automatic %}, auto-generated{% endif %}){% endif %}
+                Субтитры фрагмента{% if item.transcript_language %} ({{ item.transcript_language }}{% if item.transcript_is_automatic %}, автоматически{% endif %}){% endif %}
               {% else %}
-                Speech evidence from the fragment
+                Речевая основа анализа
               {% endif %}
             </summary>
             <p>{{ item.speech_transcript }}</p>
           </details>
         {% endif %}
-        <span class="muted">{{ item.model_name }}{% if item.analysis_source == 'video' %} · video fallback{% endif %} · {{ item.analyzed_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+        <span class="summary-meta">{{ item.model_name }}{% if item.analysis_source == 'video' %} · резервный анализ видео{% endif %} · {{ item.analyzed_at.strftime('%d.%m.%Y %H:%M') }} UTC</span>
       {% else %}
-        <p class="empty-copy">YouTube analysis status: {{ item.status.replace('_', ' ') }}{% if item.status_reason %} — {{ item.status_reason }}{% endif %}</p>
+        <div class="analysis-empty">
+          <strong>{{ youtube_status_labels.get(item.status, item.status) }}</strong>
+          {% if item.status_reason %}<p>{{ youtube_reason_labels.get(item.status_reason, item.status_reason) }}</p>{% else %}<p>Результат появится после успешной обработки источника.</p>{% endif %}
+          {% if item.next_retry_at %}<span>Следующая попытка не раньше {{ item.next_retry_at.strftime('%d.%m.%Y %H:%M') }} UTC</span>{% endif %}
+        </div>
       {% endif %}
-    </section>
-  {% endif %}
+    {% else %}
+      <div class="analysis-empty">
+        <strong>Ещё не анализировалось</strong>
+        <p>Игра попадёт в очередь YouTube-анализа в одном из следующих запусков.</p>
+      </div>
+    {% endif %}
+  </section>
 
-  <section class="section">
-    <h2>Similar games</h2>
+  <section class="section platform-section">
+    <div class="section-heading">
+      <div><h2>Оценки по платформам</h2><p class="section-note">Исходные показатели Metacritic без пересчёта</p></div>
+    </div>
+    <div class="table-wrap">
+      <table class="score-table">
+        <thead><tr><th>Платформа</th><th>Metascore</th><th>Userscore</th><th>Рецензии критиков</th><th>Оценки игроков</th></tr></thead>
+        <tbody>
+          {% for item in game.platforms %}
+            <tr>
+              <td><strong>{{ item.platform.name }}</strong>{% if lead and item.platform_id == lead.platform_id %} <span class="chip chip-small">основная</span>{% endif %}</td>
+              <td class="score-value-small">{{ item.metascore if item.metascore is not none else 'нет оценки' }}</td>
+              <td class="score-value-small">{{ item.userscore if item.userscore is not none else 'нет оценки' }}</td>
+              <td>{{ item.critic_review_count if item.critic_review_count is not none else '—' }}</td>
+              <td>{{ item.user_rating_count if item.user_rating_count is not none else '—' }}</td>
+            </tr>
+          {% else %}<tr><td colspan="5" class="empty-state"><strong>Данных по платформам пока нет</strong></td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section similar-section">
+    <div class="section-heading">
+      <div><h2>Похожие игры</h2><p class="section-note">Совпадения по механикам, жанрам и доступным метаданным</p></div>
+    </div>
     <div class="similar-grid">
       {% for match in similar_games %}
         <a class="similar-card" href="/games/{{ match.game.id }}">
-          {% if match.game.cover_image_url %}<img class="cover" src="{{ match.game.cover_image_url }}" alt="" loading="lazy">{% endif %}
+          <span class="cover-slot">{% if match.game.cover_image_url %}<img class="cover" src="{{ match.game.cover_image_url }}" alt="" loading="lazy">{% endif %}</span>
           <div>
             <strong>{{ match.game.title }}</strong>
-            <span class="match-score">{{ (match.score * 100) | round | int }}% match</span>
+            <span class="match-score">{{ (match.score * 100) | round | int }}% совпадения</span>
             <ul class="reason-list">{% for reason in match.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
           </div>
         </a>
       {% else %}
-        <p class="empty-copy">No similar games found yet — tags are added when a game is analysed.</p>
+        <div class="analysis-empty"><strong>Похожие игры пока не определены</strong><p>Список появится после добавления аналитических тегов.</p></div>
       {% endfor %}
     </div>
   </section>
 
-  <div class="two-column">
-    <section class="section">
-      <h2>Critic reviews <span class="muted">({{ critic_review_count }} collected)</span></h2>
-      {% for item in critic_reviews %}
-        <article class="text-block">
-          <h3>{{ item.publication or item.author or 'Critic' }}{% if item.score is not none %} · {{ item.score|int }}{% endif %}</h3>
-          <p>{{ item.quote }}</p>
-          <span class="muted">{{ item.platform.name if item.platform else 'All platforms' }}{% if item.review_date %} · {{ item.review_date }}{% endif %}</span>
-        </article>
-      {% else %}<p class="empty-copy">No critic reviews collected yet.</p>{% endfor %}
-    </section>
-    <section class="section">
-      <h2>User reviews <span class="muted">({{ user_review_count }} collected)</span></h2>
-      {% for item in user_reviews %}
-        <article class="text-block">
-          <h3>{{ item.author or 'User' }}{% if item.score is not none %} · {{ item.score }}{% endif %}</h3>
-          <p>{{ item.quote }}</p>
-          <span class="muted">{{ item.platform.name if item.platform else 'All platforms' }}{% if item.review_date %} · {{ item.review_date }}{% endif %}</span>
-        </article>
-      {% else %}<p class="empty-copy">No user reviews collected yet.</p>{% endfor %}
-    </section>
-  </div>
-
+  <section class="section reviews-section">
+    <div class="section-heading">
+      <div><h2>Исходные отзывы</h2><p class="section-note">Последние собранные тексты без перевода и редактирования</p></div>
+    </div>
+    <div class="two-column review-columns">
+      <div>
+        <h3 class="column-title">Критики <span>{{ critic_review_count }}</span></h3>
+        {% for item in critic_reviews %}
+          <article class="text-block">
+            <h4>{{ item.publication or item.author or 'Критик' }}{% if item.score is not none %} · {{ item.score|int }}{% endif %}</h4>
+            <p>{{ item.quote }}</p>
+            <span class="review-meta">{{ item.platform.name if item.platform else 'Все платформы' }}{% if item.review_date %} · {{ item.review_date.strftime('%d.%m.%Y') }}{% endif %}</span>
+          </article>
+        {% else %}<p class="empty-copy">Отзывы критиков пока не собраны.</p>{% endfor %}
+      </div>
+      <div>
+        <h3 class="column-title">Игроки <span>{{ user_review_count }}</span></h3>
+        {% for item in user_reviews %}
+          <article class="text-block">
+            <h4>{{ item.author or 'Пользователь' }}{% if item.score is not none %} · {{ item.score }}{% endif %}</h4>
+            <p>{{ item.quote }}</p>
+            <span class="review-meta">{{ item.platform.name if item.platform else 'Все платформы' }}{% if item.review_date %} · {{ item.review_date.strftime('%d.%m.%Y') }}{% endif %}</span>
+          </article>
+        {% else %}<p class="empty-copy">Отзывы игроков пока не собраны.</p>{% endfor %}
+      </div>
+    </div>
+  </section>
 {% endblock %}

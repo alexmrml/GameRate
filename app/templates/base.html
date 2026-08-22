@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,17 +10,20 @@
   <body>
     <header class="site-header">
       <div class="shell header-inner">
-        <a class="brand" href="/games">{{ app_name }}</a>
-        <nav aria-label="Primary navigation">
-          <a href="/games" {% if request.url.path.startswith('/games') %}aria-current="page"{% endif %}>Games</a>
-          <a href="/activity" {% if request.url.path.startswith('/activity') %}aria-current="page"{% endif %}>Activity</a>
-          <a href="/settings" {% if request.url.path.startswith('/settings') %}aria-current="page"{% endif %}>Settings</a>
+        <a class="brand-lockup" href="/games">
+          <span class="brand">{{ app_name }}</span>
+          <span class="brand-note">игровая аналитика</span>
+        </a>
+        <nav aria-label="Основная навигация">
+          <a href="/games" {% if request.url.path.startswith('/games') %}aria-current="page"{% endif %}>Каталог</a>
+          <a href="/activity" {% if request.url.path.startswith('/activity') %}aria-current="page"{% endif %}>Обработка</a>
+          <a href="/settings" {% if request.url.path.startswith('/settings') %}aria-current="page"{% endif %}>Настройки</a>
         </nav>
         <div class="account">
-          <span>{{ current_user.username }}</span>
+          <span class="account-name">{{ current_user.username }}</span>
           <form method="post" action="/logout">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="button button-quiet" type="submit">Sign out</button>
+            <button class="button button-quiet button-small" type="submit">Выйти</button>
           </form>
         </div>
       </div>
@@ -30,4 +33,3 @@
     </main>
   </body>
 </html>
-

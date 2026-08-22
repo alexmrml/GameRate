@@ -34,10 +34,10 @@ from app.models import (
     WorkerHeartbeat,
 )
 from app.security import verify_password
-from app.services.app_settings import describe_settings
+from app.services.app_settings import TUNABLES_BY_KEY, describe_settings, parse_setting_value
 from app.services.runs import enqueue_manual_run
 from app.services.similarity import lead_platform, rank_similar
-from app.templates import templates
+from app.templates import format_run_message, templates
 from app.time import utc_now
 
 router = APIRouter()
@@ -95,7 +95,7 @@ def login(
         return templates.TemplateResponse(
             request=request,
             name="login.html",
-            context={"next": next, "error": "Invalid username or password"},
+            context={"next": next, "error": "Неверное имя пользователя или пароль"},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
@@ -326,7 +326,7 @@ def run_snapshot() -> dict[str, object]:
                 {
                     "id": str(run.id),
                     "status": run.status.value,
-                    "message": run.message,
+                    "message": format_run_message(run.message),
                     "worker_id": run.worker_id,
                     "progress_current": run.progress_current,
                     "progress_total": run.progress_total,
@@ -369,15 +369,15 @@ def settings_page(
     auth: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    setting_rows = [
-        row
-        for row in db.scalars(select(AppSetting).order_by(AppSetting.key))
-        if _environment_setting_name(row.key) not in ENVIRONMENT_ONLY_SETTING_KEYS
-    ]
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context=page_context(request, auth, settings=setting_rows, tunables=describe_settings(db)),
+        context=page_context(
+            request,
+            auth,
+            tunables=describe_settings(db),
+            saved=request.query_params.get("saved") == "1",
+        ),
     )
 
 
@@ -392,14 +392,16 @@ def update_setting(
     require_csrf(csrf_token, auth)
     normalized_key = key.strip()
     if not normalized_key or len(normalized_key) > 120:
-        raise HTTPException(status_code=422, detail="Invalid setting key")
+        raise HTTPException(status_code=422, detail="Некорректная настройка")
     secret_name = _environment_setting_name(normalized_key)
     if secret_name in ENVIRONMENT_ONLY_SETTING_KEYS:
-        raise HTTPException(status_code=422, detail="API keys must be configured in environment")
+        raise HTTPException(status_code=422, detail="Ключи API задаются в окружении")
+    if normalized_key not in TUNABLES_BY_KEY:
+        raise HTTPException(status_code=422, detail="Неизвестная настройка")
     try:
-        parsed_value = json.loads(value)
-    except json.JSONDecodeError:
-        parsed_value = value
+        parsed_value = parse_setting_value(normalized_key, value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Некорректное значение настройки") from exc
     row = db.get(AppSetting, normalized_key)
     now = utc_now()
     if row is None:
@@ -410,4 +412,4 @@ def update_setting(
         row.updated_at = now
     row.updated_by_id = auth.user.id
     db.commit()
-    return RedirectResponse("/settings", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse("/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)

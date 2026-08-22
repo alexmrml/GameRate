@@ -1,44 +1,52 @@
 {% extends "base.html" %}
-{% block title %}Games · {{ app_name }}{% endblock %}
+{% block title %}Каталог · {{ app_name }}{% endblock %}
 {% block content %}
-  <div class="page-heading">
+  <header class="page-heading catalogue-heading">
     <div>
-      <h1>Games</h1>
-      <p class="muted">Discovered games with the score of their lead platform — the one with the most critic reviews.</p>
+      <h1>Каталог игр</h1>
+      <p class="page-intro">Рабочая выборка собранных игр. Для сравнения используется оценка основной платформы — с наибольшим числом рецензий критиков.</p>
     </div>
-  </div>
+    <p class="result-count"><strong>{{ rows|length }}</strong><span>игр в выборке</span></p>
+  </header>
 
   <form class="filters" method="get" action="/games">
-    <label class="search-field">
-      <span class="sr-only">Search by title</span>
-      <input type="search" name="q" value="{{ filters.q }}" placeholder="Search by title">
+    <label class="filter-control search-field">
+      <span>Название</span>
+      <input type="search" name="q" value="{{ filters.q }}" placeholder="Найти игру">
     </label>
-    <label>
-      <span class="sr-only">Platform</span>
+    <label class="filter-control">
+      <span>Платформа</span>
       <select name="platform">
-        <option value="">All platforms</option>
+        <option value="">Все платформы</option>
         {% for item in platforms %}
           <option value="{{ item.slug }}" {% if filters.platform == item.slug %}selected{% endif %}>{{ item.name }}</option>
         {% endfor %}
       </select>
     </label>
-    <label>
-      <span class="sr-only">Sort</span>
+    <label class="filter-control">
+      <span>Порядок</span>
       <select name="sort">
-        <option value="released" {% if filters.sort == 'released' %}selected{% endif %}>Sort by release date</option>
-        <option value="title" {% if filters.sort == 'title' %}selected{% endif %}>Sort by title</option>
-        <option value="metascore" {% if filters.sort == 'metascore' %}selected{% endif %}>Sort by Metascore</option>
-        <option value="userscore" {% if filters.sort == 'userscore' %}selected{% endif %}>Sort by Userscore</option>
+        <option value="released" {% if filters.sort == 'released' %}selected{% endif %}>Сначала новые</option>
+        <option value="title" {% if filters.sort == 'title' %}selected{% endif %}>По названию</option>
+        <option value="metascore" {% if filters.sort == 'metascore' %}selected{% endif %}>По Metascore</option>
+        <option value="userscore" {% if filters.sort == 'userscore' %}selected{% endif %}>По Userscore</option>
       </select>
     </label>
-    <button class="button" type="submit">Apply</button>
-    {% if filters.q or filters.platform or filters.sort != 'released' %}<a class="button button-quiet" href="/games">Reset</a>{% endif %}
+    <button class="button button-filter" type="submit">Показать</button>
+    {% if filters.q or filters.platform or filters.sort != 'released' %}<a class="button button-quiet button-filter" href="/games">Сбросить</a>{% endif %}
   </form>
 
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap catalogue-table-wrap">
+    <table class="catalogue-table">
+      <colgroup>
+        <col class="catalogue-col-title">
+        <col class="catalogue-col-platforms">
+        <col class="catalogue-col-score">
+        <col class="catalogue-col-score">
+        <col class="catalogue-col-date">
+      </colgroup>
       <thead>
-        <tr><th>Game</th><th>Platforms</th><th>Metascore</th><th>Userscore</th><th>Released</th></tr>
+        <tr><th>Игра</th><th>Платформы</th><th>Metascore</th><th>Userscore</th><th>Релиз</th></tr>
       </thead>
       <tbody>
         {% for row in rows %}
@@ -47,10 +55,12 @@
           <tr>
             <td>
               <div class="title-cell">
-                {% if game.cover_image_url %}<img class="cover" src="{{ game.cover_image_url }}" alt="" loading="lazy">{% endif %}
-                <div>
+                <span class="cover-slot">
+                  {% if game.cover_image_url %}<img class="cover" src="{{ game.cover_image_url }}" alt="" loading="lazy">{% endif %}
+                </span>
+                <div class="title-copy">
                   <a class="table-title" href="/games/{{ game.id }}">{{ game.title }}</a>
-                  {% if game.developer %}<span class="table-subtitle">{{ game.developer }}</span>{% endif %}
+                  {% if game.developer %}<span class="table-subtitle">{{ game.developer }}</span>{% else %}<span class="table-subtitle">Разработчик не указан</span>{% endif %}
                 </div>
               </div>
             </td>
@@ -59,24 +69,24 @@
                 {% for item in game.platforms %}
                   <a class="badge {% if lead and item.platform_id == lead.platform_id %}badge-lead{% endif %}"
                      href="/games?platform={{ item.platform.slug }}"
-                     title="Filter by {{ item.platform.name }}{% if lead and item.platform_id == lead.platform_id %} · lead platform{% endif %}">{{ item.platform.name }}</a>
+                     title="Показать игры для {{ item.platform.name }}{% if lead and item.platform_id == lead.platform_id %} · основная платформа{% endif %}">{{ item.platform.name }}</a>
                 {% else %}<span class="muted">—</span>{% endfor %}
               </div>
             </td>
             <td class="score-cell">
               {% if lead and lead.metascore is not none %}
-                <strong>{{ lead.metascore }}</strong><span class="table-subtitle">{{ lead.platform.name }}</span>
-              {% else %}<span class="muted" title="Metacritic has no score yet">not rated</span>{% endif %}
+                <strong class="score-value">{{ lead.metascore }}</strong><span class="table-subtitle">{{ lead.platform.name }}</span>
+              {% else %}<span class="not-rated" title="Metacritic пока не опубликовал оценку">нет оценки</span>{% endif %}
             </td>
             <td class="score-cell">
               {% if lead and lead.userscore is not none %}
-                <strong>{{ lead.userscore }}</strong><span class="table-subtitle">{{ lead.platform.name }}</span>
-              {% else %}<span class="muted" title="Metacritic has no score yet">not rated</span>{% endif %}
+                <strong class="score-value">{{ lead.userscore }}</strong><span class="table-subtitle">{{ lead.platform.name }}</span>
+              {% else %}<span class="not-rated" title="Metacritic пока не опубликовал оценку">нет оценки</span>{% endif %}
             </td>
-            <td class="nowrap">{{ game.release_date if game.release_date else '—' }}</td>
+            <td class="nowrap release-cell">{{ game.release_date.strftime('%d.%m.%Y') if game.release_date else '—' }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="5" class="empty-state">No games match these filters.</td></tr>
+          <tr><td colspan="5" class="empty-state"><strong>Ничего не найдено</strong><span>Измените запрос или сбросьте фильтры.</span></td></tr>
         {% endfor %}
       </tbody>
     </table>

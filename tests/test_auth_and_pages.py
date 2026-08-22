@@ -7,6 +7,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import AppSetting, UserSession
 from app.security import token_digest
+from app.templates import format_run_message
 from app.time import utc_now
 
 
@@ -25,7 +26,7 @@ def test_login_uses_server_side_session(
 ) -> None:
     response = authenticated_client.get("/games")
     assert response.status_code == 200
-    assert "Games" in response.text
+    assert "Каталог игр" in response.text
 
     raw_token = authenticated_client.cookies[settings.session_cookie_name]
     with SessionLocal() as db:
@@ -41,7 +42,7 @@ def test_bad_password_is_rejected(client: TestClient, user: object) -> None:
         data={"username": "admin", "password": "not-the-password", "next": "/games"},
     )
     assert response.status_code == 401
-    assert "Invalid username or password" in response.text
+    assert "Неверное имя пользователя или пароль" in response.text
 
 
 def test_authenticated_mutation_requires_csrf(authenticated_client: TestClient) -> None:
@@ -85,3 +86,31 @@ def test_provider_keys_cannot_be_saved_or_rendered_on_settings(
         db.commit()
     rendered = authenticated_client.get("/settings")
     assert "legacy-secret" not in rendered.text
+
+
+def test_settings_page_uses_user_facing_controls(authenticated_client: TestClient) -> None:
+    page = authenticated_client.get("/settings")
+    assert page.status_code == 200
+    assert "Сводки и теги" in page.text
+    assert "Обогащать данные с помощью AI" in page.text
+    assert "Stored values" not in page.text
+    assert "<code>ai.enabled</code>" not in page.text
+
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert csrf is not None
+    saved = authenticated_client.post(
+        "/settings",
+        data={"csrf_token": csrf.group(1), "key": "ai.min_reviews", "value": "4"},
+    )
+    assert saved.status_code == 303
+    assert saved.headers["location"] == "/settings?saved=1"
+    with SessionLocal() as db:
+        assert db.get(AppSetting, "ai.min_reviews").value == 4
+
+
+def test_activity_messages_are_localized_for_display() -> None:
+    assert format_run_message("Waiting for worker") == "Ожидает воркер"
+    assert (
+        format_run_message("Processed 20 games · AI: 8 enriched · YouTube: 3 analyzed")
+        == "Обработано игр: 20 · AI: 8 обогащено · YouTube: 3 проанализировано"
+    )
