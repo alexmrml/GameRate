@@ -26,16 +26,19 @@ from app.models import Game
 
 # Weights are relative importance, not percentages: the denominator is whatever could be
 # compared. They were tuned by eye against the collected catalogue (see AGENTS.md).
-WEIGHTS: dict[str, float] = {
+TAG_FACET_WEIGHTS: dict[str, float] = {
     "mechanics": 0.28,  # what you actually do; the strongest signal for "plays like"
-    "genres": 0.16,  # Metacritic's own classification, factual rather than inferred
     "setting": 0.12,  # world and theme
     "structure": 0.10,  # solo/co-op, story-driven, run-based, length
     "style": 0.10,  # perspective and art direction
-    "related": 0.08,  # Metacritic lists the other game among this one's genre peers
     "descriptors": 0.06,  # free-form specifics such as "rail-shooter"
-    "developer": 0.06,  # same studio usually means a familiar feel
     "mood": 0.05,  # tone; weaker because most games claim several
+}
+WEIGHTS: dict[str, float] = {
+    **TAG_FACET_WEIGHTS,
+    "genres": 0.16,  # Metacritic's own classification, factual rather than inferred
+    "related": 0.08,  # Metacritic lists the other game among this one's genre peers
+    "developer": 0.06,  # same studio usually means a familiar feel
     "score": 0.04,  # comparable quality band
     "esrb": 0.03,  # who the game is made for
     "publisher": 0.02,
@@ -49,12 +52,12 @@ YEAR_SPAN = 8.0
 MIN_SCORE = 0.12  # below this the "match" is noise, so nothing is shown
 
 FACET_LABELS = {
-    "mechanics": "gameplay",
-    "setting": "setting",
-    "style": "presentation",
-    "structure": "structure",
-    "mood": "tone",
-    "descriptors": "specifics",
+    "mechanics": "механика",
+    "setting": "сеттинг",
+    "style": "подача",
+    "structure": "структура",
+    "mood": "настроение",
+    "descriptors": "особенности",
 }
 
 
@@ -169,11 +172,15 @@ def _closeness(left: float | None, right: float | None, span: float) -> float | 
 def compare(left: GameFeatures, right: GameFeatures) -> Comparison:
     components: list[Component] = []
 
-    for facet in ("mechanics", "setting", "style", "structure", "mood", "descriptors"):
+    # The keys are the complete AI tag schema, including free descriptors. Keeping the
+    # iteration tied to the component weights prevents a displayed facet from silently
+    # becoming decoration-only when the vocabulary changes (for example, `anime` is a
+    # setting value and therefore contributes through the setting component).
+    for facet, weight in TAG_FACET_WEIGHTS.items():
         first, second = left.facets.get(facet, set()), right.facets.get(facet, set())
         score = set_overlap(first, second)
         if score is not None:
-            components.append(Component(facet, WEIGHTS[facet], score, sorted(first & second)))
+            components.append(Component(facet, weight, score, sorted(first & second)))
 
     genre_score = set_overlap(left.genres, right.genres)
     if genre_score is not None:
@@ -225,17 +232,17 @@ def _reasons(left: GameFeatures, right: GameFeatures, components: list[Component
         if component.score <= 0:
             continue
         if component.name == "genres" and component.shared:
-            reasons.append("Same genre: " + ", ".join(component.shared).replace("-", " "))
+            reasons.append("Общий жанр: " + ", ".join(component.shared).replace("-", " "))
         elif component.name in FACET_LABELS and component.shared:
             label = FACET_LABELS[component.name]
             shared = ", ".join(tag.replace("-", " ") for tag in component.shared[:3])
-            reasons.append(f"Shared {label}: {shared}")
+            reasons.append(f"Общая {label}: {shared}")
         elif component.name == "developer":
-            reasons.append(f"Same developer: {right.developer_name or left.developer_name}")
+            reasons.append(f"Один разработчик: {right.developer_name or left.developer_name}")
         elif component.name == "related":
-            reasons.append("Listed by Metacritic among this game's peers")
+            reasons.append("Metacritic относит игры к похожим")
         elif component.name == "score" and component.score > 0.8:
-            reasons.append("Similar Metascore")
+            reasons.append("Близкий Metascore")
         if len(reasons) >= 3:
             break
     return reasons

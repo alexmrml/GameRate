@@ -2,7 +2,9 @@
 
 from datetime import date
 
+from app.collectors.gemini import FACET_VOCABULARY
 from app.services.similarity import (
+    TAG_FACET_WEIGHTS,
     GameFeatures,
     compare,
     lead_platform,
@@ -95,6 +97,31 @@ def test_identical_feature_sets_score_one() -> None:
     assert result.raw == 1.0
     assert result.confidence == 1.0
     assert result.score == 1.0
+
+
+def test_every_displayed_ai_tag_facet_participates_in_similarity() -> None:
+    assert set(TAG_FACET_WEIGHTS) == {*FACET_VOCABULARY, "descriptors"}
+    for facet in TAG_FACET_WEIGHTS:
+        result = compare(
+            features(facets={facet: {"anime"}}),
+            features(facets={facet: {"anime"}}),
+        )
+        assert [component.name for component in result.components] == [facet]
+        assert result.components[0].score == 1.0
+
+
+def test_anime_contributes_through_the_setting_component() -> None:
+    shared = compare(
+        features(facets={"setting": {"anime", "school-life"}}),
+        features(facets={"setting": {"anime", "modern-day"}}),
+    )
+    different = compare(
+        features(facets={"setting": {"anime", "school-life"}}),
+        features(facets={"setting": {"fantasy", "medieval"}}),
+    )
+
+    assert shared.score > different.score
+    assert shared.components[0].shared == ["anime"]
 
 
 def test_missing_features_are_ignored_instead_of_penalised() -> None:
@@ -233,7 +260,7 @@ def test_matches_explain_themselves() -> None:
     match = rank_similar(catalogue[0], catalogue, limit=1)[0]
 
     assert match.reasons
-    assert any("gameplay" in reason for reason in match.reasons)
+    assert any("механика" in reason for reason in match.reasons)
 
 
 def test_a_game_is_never_similar_to_itself() -> None:
