@@ -109,8 +109,8 @@ Empty searches and provider errors are persisted, so an hourly run does not repe
 immediately; candidates are cached so a silent or unavailable video can advance to the next
 result without another search.
 
-The analysis itself reads the video's **subtitles**, not the video. yt-dlp fetches the caption
-track — the creator's own subtitles when they exist, otherwise YouTube's automatic ones — without
+The analysis itself reads the video's **subtitles**, not the video. yt-dlp reads the player
+metadata and selects the caption track; the signed JSON track is then fetched directly, without
 downloading any video or audio. Machine-translated caption tracks are ignored, so the transcript
 is always in the language actually spoken.
 

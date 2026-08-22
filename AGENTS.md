@@ -80,7 +80,11 @@ Web and worker share configuration and models but no process memory.
 - Free keys allow about **5 requests per minute** on `gemini-*-flash` but far more on
   `gemma-4-31b-it`, which is why Gemma is the default for an hourly crawler; its output quality
   was comparable in side-by-side checks. `GEMINI_REQUESTS_PER_MINUTE` paces calls, and a 429 with
-  a `retryDelay` is honoured instead of guessed. Change `ai.model` from `/settings` on a paid key.
+  a `retryDelay` is honoured instead of guessed. The three attempts inside one logical call wait
+  at least 30 seconds between attempts. Exhausted review/tag work is stored in
+  `ai_enrichment_retries`; every crawl samples at most five distinct games from that queue and
+  gives one task per game one extra single-attempt request. Change `ai.model` from `/settings` on
+  a paid key.
 - `PROMPT_VERSION` in the collector is part of `review_summaries.input_digest`
   (`"<version>:<sha256 of review keys>"`). Bumping it after a prompt change makes every stored
   summary stale and regenerates it on the next run — do that instead of editing rows by hand.
@@ -107,6 +111,13 @@ Web and worker share configuration and models but no process memory.
 - Weights (relative, not percentages): mechanics .28, genres .16, setting .12, structure .10,
   style .10, Metacritic peer listing .08, descriptors .06, developer .06, mood .05, score .04,
   ESRB .03, publisher .02, platforms .02, release year .02.
+- The weights were rechecked against the 2026-08-22 local 242-game catalogue: paired Hot Spike
+  editions ranked first for each other (.823), Duskfade's first four genre peers were 3D
+  platformers, Just Anomaly's first eight were first-person adventures, and the unrelated
+  Duskfade/Simple Airline Sim pair scored .076, below the .12 display cutoff. The ordering did not
+  justify changing the weights. `TAG_FACET_WEIGHTS` is the complete model-tag component map:
+  every controlled facet plus descriptors participates, so values such as `anime` contribute
+  through `setting` rather than receiving word-specific weights.
 - Tags come from a controlled vocabulary in the collector (`FACET_VOCABULARY`) plus up to five
   free `descriptors`. A fixed vocabulary is what makes tags comparable between games; values
   outside it are dropped rather than stored.
@@ -192,6 +203,11 @@ Web and worker share configuration and models but no process memory.
   written. Sending the video to Gemini was quota-bound to roughly one game per run; reading
   captions costs about 5 seconds and one ordinary text call, which is why the per-run cap is
   now 5 games and the one-game limit survives only on the fallback.
+- Do not assume yt-dlp's network layer avoids timed-text rate limits. On 2026-08-22 four saved
+  429 cases were retried with fresh track URLs in alternating order: direct `httpx` and
+  `YoutubeDL.urlopen` both returned 429 for all four. Keep the smaller direct fetch unless a new
+  measurement shows a real transport difference; switching APIs alone does not solve an IP-side
+  YouTube rate limit.
 - Caption track choice is a correctness rule, not a preference. YouTube publishes machine
   *translations* of the automatic captions under every language code, marked by `tlang=` in
   the URL; a translation of a transcription cannot support a verbatim quote. Only original
