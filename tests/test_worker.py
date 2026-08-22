@@ -19,8 +19,8 @@ from app.services.runs import (
     ensure_scheduled_run,
     recover_stale_runs,
 )
-from app.time import utc_now
-from app.worker import work_once
+from app.time import as_utc, utc_now
+from app.worker import _heartbeat_loop, heartbeat, work_once
 from tests.conftest import StubMetacriticClient
 
 
@@ -53,6 +53,40 @@ def test_worker_returns_false_without_work() -> None:
     assert work_once("idle-worker", utc_now(), schedule=False) is False
     with SessionLocal() as db:
         assert db.scalar(select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == "idle-worker"))
+
+
+def test_busy_worker_refreshes_heartbeat_between_pipeline_updates() -> None:
+    started_at = utc_now() - timedelta(hours=1)
+    with SessionLocal() as db:
+        run = enqueue_scheduled_run(db)
+        run.status = RunStatus.RUNNING
+        run.worker_id = "busy-worker"
+        db.commit()
+        heartbeat(db, "busy-worker", started_at, run.id)
+        row = db.get(WorkerHeartbeat, "busy-worker")
+        row.last_seen_at = started_at
+        db.commit()
+        run_id = run.id
+
+    class StopAfterOnePulse:
+        calls = 0
+
+        def wait(self, _interval: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    _heartbeat_loop(
+        StopAfterOnePulse(),  # type: ignore[arg-type]
+        "busy-worker",
+        started_at,
+        run_id,
+        interval=0.001,
+    )
+
+    with SessionLocal() as db:
+        refreshed = db.get(WorkerHeartbeat, "busy-worker")
+        assert as_utc(refreshed.last_seen_at) > started_at
+        assert refreshed.current_run_id == run_id
 
 
 def test_database_rejects_two_running_jobs(user: object) -> None:

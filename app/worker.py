@@ -2,6 +2,7 @@ import argparse
 import logging
 import signal
 import socket
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -49,6 +50,24 @@ def heartbeat(db: Session, worker_id: str, started_at: datetime, run_id: object 
     db.commit()
 
 
+def _heartbeat_loop(
+    stop: threading.Event,
+    worker_id: str,
+    started_at: datetime,
+    run_id: object,
+    *,
+    interval: float | None = None,
+) -> None:
+    """Keep a busy worker visible while a long collector or AI call is in flight."""
+    pulse_every = interval or max(1.0, min(settings.worker_stale_seconds / 3, 10.0))
+    while not stop.wait(pulse_every):
+        try:
+            with SessionLocal() as db:
+                heartbeat(db, worker_id, started_at, run_id)
+        except Exception:
+            logger.exception("worker heartbeat failed id=%s run=%s", worker_id, run_id)
+
+
 def fail_run(db: Session, run_id: object, error: Exception) -> None:
     db.rollback()
     failed = db.scalar(select(ProcessingRun).where(ProcessingRun.id == run_id))
@@ -81,6 +100,14 @@ def work_once(
         if run is None:
             return False
         heartbeat(db, worker_id, started_at, run.id)
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(heartbeat_stop, worker_id, started_at, run.id),
+            name=f"heartbeat-{worker_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         client: MetacriticClient | None = None
         try:
             client = client_factory()
@@ -91,6 +118,8 @@ def work_once(
         finally:
             if client is not None:
                 client.close()
+            heartbeat_stop.set()
+            heartbeat_thread.join()
             heartbeat(db, worker_id, started_at)
         return True
 
