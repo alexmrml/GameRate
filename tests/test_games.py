@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -83,6 +84,119 @@ def test_games_search_platform_filter_and_sort(authenticated_client: TestClient)
     assert "Alpha Quest" in response.text
     assert "Beta Drive" not in response.text
     assert "92" in response.text
+
+
+def seed_catalogue(count: int, prefix: str = "Game") -> None:
+    with SessionLocal() as db:
+        for index in range(count):
+            upsert_discovered_game(
+                db, title=f"{prefix} {index:03d}", external_key=f"seed-{index:03d}"
+            )
+        db.commit()
+
+
+def test_the_catalogue_is_split_into_pages_of_fifty(authenticated_client: TestClient) -> None:
+    seed_catalogue(120)
+
+    first = authenticated_client.get("/games?sort=title")
+    assert first.status_code == 200
+    assert first.text.count('class="table-title"') == 50
+    assert "Game 000" in first.text
+    assert "Game 049" in first.text
+    assert "Game 050" not in first.text
+    assert "Страница 1 из 3" in first.text
+    # The count stays the size of the whole filtered selection, not of the page.
+    assert "<strong>120</strong>" in first.text
+
+    second = authenticated_client.get("/games?sort=title&page=2")
+    assert second.text.count('class="table-title"') == 50
+    assert "Game 050" in second.text
+    assert "Game 000" not in second.text
+
+    third = authenticated_client.get("/games?sort=title&page=3")
+    assert third.text.count('class="table-title"') == 20
+    assert "Game 119" in third.text
+    assert "Страница 3 из 3" in third.text
+
+
+def page_titles(body: str) -> list[str]:
+    return re.findall(r'class="table-title" href="[^"]+">([^<]+)</a>', body)
+
+
+def test_rows_that_compare_equal_still_get_one_fixed_order(
+    authenticated_client: TestClient,
+) -> None:
+    """Paging an order that is not total would drop one game and repeat another."""
+    with SessionLocal() as db:
+        # Inserted newest-title-first and all on one release date, so neither insertion
+        # order nor the sort key alone can produce the expected sequence.
+        for index in reversed(range(60)):
+            upsert_discovered_game(
+                db,
+                title=f"Tie {index:03d}",
+                release_date=date(2026, 5, 1),
+                external_key=f"tie-{index:03d}",
+            )
+        db.commit()
+
+    for sort in ("released", "metascore", "userscore", "title"):
+        first = page_titles(authenticated_client.get(f"/games?sort={sort}").text)
+        second = page_titles(authenticated_client.get(f"/games?sort={sort}&page=2").text)
+        assert first == [f"Tie {index:03d}" for index in range(50)], sort
+        assert second == [f"Tie {index:03d}" for index in range(50, 60)], sort
+        # No game is lost between the pages and none is shown twice.
+        assert len(set(first + second)) == 60, sort
+
+
+def test_page_links_keep_the_active_filters(authenticated_client: TestClient) -> None:
+    seed_catalogue(60)
+
+    body = authenticated_client.get("/games?q=Game&sort=title").text
+
+    assert "/games?q=Game&amp;sort=title&amp;page=2" in body
+
+
+def test_a_page_past_the_end_lands_on_the_last_page(authenticated_client: TestClient) -> None:
+    seed_catalogue(60)
+
+    response = authenticated_client.get("/games?q=Game&sort=title&page=9")
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/games?q=Game&sort=title&page=2"
+
+
+def test_page_links_round_trip_a_query_with_spaces_and_non_ascii(
+    authenticated_client: TestClient,
+) -> None:
+    """The filter is percent-encoded once, by urlencode — never again by the redirect."""
+    seed_catalogue(60, prefix="Игра & Ко")
+    query = {"q": "Игра & Ко", "sort": "title"}
+
+    body = authenticated_client.get("/games", params=query).text
+    link = re.search(r'href="(/games\?[^"]*page=2)"', body).group(1).replace("&amp;", "&")
+    second = authenticated_client.get(link)
+
+    assert second.status_code == 200
+    assert "Игра &amp; Ко 050" in second.text
+    assert "Страница 2 из 2" in second.text
+
+    # The same encoding has to survive the out-of-range redirect.
+    stale = authenticated_client.get("/games", params={**query, "page": "9"})
+    assert stale.status_code == 303
+    landed = authenticated_client.get(stale.headers["location"])
+    assert landed.status_code == 200
+    assert "Страница 2 из 2" in landed.text
+
+
+def test_a_catalogue_that_fits_one_page_shows_no_paging_strip(
+    authenticated_client: TestClient,
+) -> None:
+    seed_catalogue(3)
+
+    body = authenticated_client.get("/games").text
+
+    assert "pagination" not in body
+    assert "игр в выборке" in body
 
 
 def test_game_detail_page(authenticated_client: TestClient) -> None:

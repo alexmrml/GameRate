@@ -37,6 +37,9 @@ queues one as soon as it starts. **Start processing** on `/activity` queues the 
 both use the same code path. The Activity page streams status, progress, current game and the run
 message while a batch is in flight, and `/games` fills up as games are saved.
 
+The catalogue at `/games` is paged 50 games at a time; the search, platform and sort filters stay
+attached to the page links, and changing a filter returns to the first page.
+
 For each game the crawler stores title, cover, developer, publisher, description, release date,
 genres, video link when Metacritic has one, and every platform with its own Metascore and
 Userscore, plus the critic and user reviews that later feed AI summaries. A game that fails is
@@ -83,6 +86,7 @@ absolute count and in relative growth.
 | `GEMINI_API_KEY` | Gemini key; environment-only, never editable from `/settings` |
 | `GEMINI_MODEL` | Default model (`ai.model` on `/settings` overrides it) |
 | `GEMINI_REQUESTS_PER_MINUTE` | Pacing so a batch stays inside the key's quota |
+| `GEMINI_REQUEST_TIMEOUT_SECONDS` | Deadline for one model request (600s); a request that hits it is not retried, the run moves on |
 | `AI_ENABLED` | Turn enrichment off without removing the key |
 | `AI_MIN_REVIEWS` | Reviews an audience needs before it is summarised |
 | `AI_MAX_GAMES_PER_RUN` | Upper bound on games enriched per run |

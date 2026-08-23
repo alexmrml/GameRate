@@ -107,6 +107,16 @@ tbody tr:hover { background: #f8faf7; }
 .empty-state strong, .empty-state span { display: block; }
 .empty-state strong { margin-bottom: 4px; color: var(--text); font-size: 15px; }
 
+.pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.pagination-step { flex: 0 0 auto; }
+.pagination-step-off { border-color: var(--border); color: var(--muted); cursor: default; pointer-events: none; }
+.pagination-pages { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.pagination-page { display: inline-flex; min-width: 34px; height: 34px; align-items: center; justify-content: center; padding: 0 8px; border: 1px solid transparent; border-radius: var(--radius); color: var(--muted); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; text-decoration: none; transition: border-color .16s, background .16s, color .16s; }
+a.pagination-page:hover { border-color: var(--border-strong); background: var(--paper); color: var(--ink); }
+.pagination-page-current { border-color: #8baea3; background: var(--accent-soft); color: var(--accent-dark); }
+.pagination-gap { padding: 0 2px; color: var(--muted); font-size: 13px; }
+.pagination-status { margin: 0 0 0 auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+
 .section { margin-top: 54px; }
 .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; padding-bottom: 13px; border-bottom: 1px solid var(--border-strong); }
 .section-heading h2, .section-heading p { margin-bottom: 0; }
@@ -275,6 +285,10 @@ tbody tr:hover { background: #f8faf7; }
   .page-heading { flex-direction: column; gap: 18px; margin-bottom: 23px; }
   .result-count { justify-content: flex-start; }
   .filters { flex-direction: column; align-items: stretch; padding: 15px; }
+  /* Zero flex-basis, so the strip keeps Назад and Вперёд on one row and the numbers
+     wrap inside the space that is left instead of pushing each step onto its own line. */
+  .pagination-pages { flex: 1 1 0; min-width: 0; }
+  .pagination-status { width: 100%; margin-left: 0; }
   .filter-control, .filters .search-field, .filters .button { width: 100%; }
   .catalogue-table { min-width: 800px; }
   .catalogue-col-title { width: 300px; }

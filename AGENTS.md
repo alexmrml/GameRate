@@ -64,6 +64,14 @@ Web and worker share configuration and models but no process memory.
 - `game_reviews` stores collected critic and user reviews verbatim, keyed by
   `(game_id, external_key)`. It is the only input the review summaries are allowed to use.
 
+**Known limitation, deliberately not fixed.** The browse cursor is per calendar day, so a new day
+restarts the traversal at page 1 of a listing sorted newest-first, and the New Releases stage
+resets `browse_page`/`browse_offset` on top of that. Days after the first therefore re-collect the
+head of the listing — games already in the catalogue — instead of advancing. Scores do get
+refreshed by this, but at the cost of nearly the whole batch. Leave it alone unless asked: the
+owner reviewed a fix (a cursor carried across days plus a bounded refresh lane) and chose to keep
+the current behaviour.
+
 ## Gemini enrichment
 
 - `app/collectors/gemini.py` uses the official `google-genai` SDK. Every call is constrained by a
@@ -77,6 +85,12 @@ Web and worker share configuration and models but no process memory.
   model) disables Gemini for the rest of the run, `GeminiTemporaryError` (quota, 5xx) skips one
   game and lets the next try, `GeminiInvalidResponse` retries then reports. Nothing propagates
   into the crawl: a run whose collection succeeded stays SUCCEEDED.
+- Every request carries `HttpOptions.timeout` (`GEMINI_REQUEST_TIMEOUT_SECONDS`, 600s, expressed
+  to the SDK in **milliseconds**). The SDK sends no deadline of its own, so without it a stalled
+  connection freezes the worker thread and the run keeps its RUNNING row forever. A request that
+  hits the deadline becomes a `GeminiTemporaryError` **immediately, without the remaining
+  attempts**: repeating a call that already burned the full budget only stalls the run further,
+  so the game is queued in `ai_enrichment_retries` and the phase moves to the next one.
 - Free keys allow about **5 requests per minute** on `gemini-*-flash` but far more on
   `gemma-4-31b-it`, which is why Gemma is the default for an hourly crawler; its output quality
   was comparable in side-by-side checks. `GEMINI_REQUESTS_PER_MINUTE` paces calls, and a 429 with
@@ -257,6 +271,22 @@ Web and worker share configuration and models but no process memory.
 - `GOOGLE_CLOUD_API_KEY` and `GEMINI_API_KEY` are environment-only. YouTube feature/model/
   fragment/density/batch tunables use `app/services/app_settings.py`; no YouTube failure may
   fail the crawl or stop ordinary Gemini enrichment.
+
+## Catalogue page
+
+- `/games` loads the filtered catalogue, ranks it in Python — the lead-platform score is not a
+  SQL aggregate — and then slices one page of `CATALOGUE_PAGE_SIZE` (50) rows. Ordering must stay
+  in Python for as long as the displayed score is chosen by `lead_platform`.
+- **The ordering must stay total.** Because the ranked list is then sliced into pages, rows that
+  compare equal may not be left in database order: PostgreSQL does not promise to repeat it
+  between requests, and a page boundary inside such a group drops one game and repeats another.
+  A first `(title, id)` sort supplies the tie-break; every later pass is stable and preserves it.
+  Any new sort mode must be added as another stable pass, never as a re-sort that discards it.
+- `?page=` is 1-based and validated by FastAPI (`ge=1`). A page past the end is a stale link, not
+  an error: the route redirects (303) to the last real page with the filters intact. The filter
+  form carries no `page` field, so changing a filter always returns to page one.
+- The context key is `pagination.links`, never `items`: Jinja resolves attributes before keys, so
+  `pagination.items` would reach `dict.items` instead of the list.
 
 ## Generated language
 

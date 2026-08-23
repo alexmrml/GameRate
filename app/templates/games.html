@@ -6,7 +6,10 @@
       <h1>Каталог игр</h1>
       <p class="page-intro">Рабочая выборка собранных игр. Для сравнения используется оценка основной платформы — с наибольшим числом рецензий критиков.</p>
     </div>
-    <p class="result-count"><strong>{{ rows|length }}</strong><span>игр в выборке</span></p>
+    <p class="result-count">
+      <strong>{{ pagination.total }}</strong>
+      <span>{% if pagination.page_count > 1 %}игр · показаны {{ pagination.first }}–{{ pagination.last }}{% else %}игр в выборке{% endif %}</span>
+    </p>
   </header>
 
   <form class="filters" method="get" action="/games">
@@ -91,4 +94,31 @@
       </tbody>
     </table>
   </div>
+
+  {% if pagination.page_count > 1 %}
+    <nav class="pagination" aria-label="Страницы каталога">
+      {% if pagination.previous_url %}
+        <a class="button button-small pagination-step" href="{{ pagination.previous_url }}" rel="prev">Назад</a>
+      {% else %}
+        <span class="button button-small pagination-step pagination-step-off" aria-disabled="true">Назад</span>
+      {% endif %}
+      <ol class="pagination-pages">
+        {% for item in pagination.links %}
+          {% if item is none %}
+            <li class="pagination-gap" aria-hidden="true">…</li>
+          {% elif item.number == pagination.page %}
+            <li><span class="pagination-page pagination-page-current" aria-current="page">{{ item.number }}</span></li>
+          {% else %}
+            <li><a class="pagination-page" href="{{ item.url }}" aria-label="Страница {{ item.number }}">{{ item.number }}</a></li>
+          {% endif %}
+        {% endfor %}
+      </ol>
+      {% if pagination.next_url %}
+        <a class="button button-small pagination-step" href="{{ pagination.next_url }}" rel="next">Вперёд</a>
+      {% else %}
+        <span class="button button-small pagination-step pagination-step-off" aria-disabled="true">Вперёд</span>
+      {% endif %}
+      <p class="pagination-status">Страница {{ pagination.page }} из {{ pagination.page_count }}</p>
+    </nav>
+  {% endif %}
 {% endblock %}

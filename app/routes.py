@@ -1,12 +1,14 @@
 import asyncio
 import json
+import math
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date, timedelta
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
@@ -50,6 +52,10 @@ from app.youtube_proxies import InvalidYouTubeProxy
 
 router = APIRouter()
 ENVIRONMENT_ONLY_SETTING_KEYS = {"GEMINI_API_KEY", "GOOGLE_CLOUD_API_KEY"}
+CATALOGUE_PAGE_SIZE = 50
+# How many page numbers stay visible around the current one and at each end of the strip.
+PAGE_LINKS_AROUND = 2
+PAGE_LINKS_AT_EDGE = 1
 
 
 def _environment_setting_name(key: str) -> str:
@@ -135,15 +141,41 @@ def root() -> RedirectResponse:
     return RedirectResponse("/games", status_code=status.HTTP_303_SEE_OTHER)
 
 
+def catalogue_url(filters: dict[str, str], page: int) -> str:
+    """A catalogue link that carries the current filters, and the page only when it moves."""
+    params = {key: value for key, value in filters.items() if value}
+    if page > 1:
+        params["page"] = str(page)
+    query = urlencode(params)
+    return f"/games?{query}" if query else "/games"
+
+
+def page_numbers(page: int, page_count: int) -> list[int | None]:
+    """Page numbers to show, with ``None`` marking a gap the strip skips over."""
+    wanted = set(range(1, min(PAGE_LINKS_AT_EDGE, page_count) + 1))
+    wanted.update(range(max(page_count - PAGE_LINKS_AT_EDGE + 1, 1), page_count + 1))
+    around_last = min(page + PAGE_LINKS_AROUND, page_count)
+    wanted.update(range(max(page - PAGE_LINKS_AROUND, 1), around_last + 1))
+    items: list[int | None] = []
+    previous = 0
+    for number in sorted(wanted):
+        if previous and number - previous > 1:
+            items.append(None)
+        items.append(number)
+        previous = number
+    return items
+
+
 @router.get("/games", response_class=HTMLResponse)
 def games_page(
     request: Request,
     q: str = "",
     platform: str = "",
     sort: str = Query(default="released", pattern="^(title|released|metascore|userscore)$"),
+    page: int = Query(default=1, ge=1),
     auth: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
-) -> HTMLResponse:
+) -> Response:
     platform_rows = db.scalars(select(Platform).order_by(Platform.name)).all()
     stmt = select(Game).options(selectinload(Game.platforms).selectinload(GamePlatform.platform))
     if q:
@@ -163,9 +195,15 @@ def games_page(
         }
         for game in games
     ]
-    if sort == "title":
-        rows.sort(key=lambda row: row["game"].title.casefold())
-    elif sort == "released":
+    # The ordering has to be total, because the result is then cut into pages. Rows that
+    # compare equal would otherwise keep whatever order the database happened to return —
+    # which PostgreSQL never promises to repeat between requests, least of all for a table
+    # the crawler keeps updating — and a page boundary falling inside such a group drops
+    # one game from the catalogue and shows another one twice. Every pass below is stable,
+    # so this first one remains the tie-break under all of them, and it is already the
+    # order `sort=title` asks for.
+    rows.sort(key=lambda row: (row["game"].title.casefold(), str(row["game"].id)))
+    if sort == "released":
         rows.sort(
             key=lambda row: (row["release_date"] is not None, row["release_date"] or date.min),
             reverse=True,
@@ -178,10 +216,19 @@ def games_page(
             # Unrated games sort last on their own rank; no placeholder score is invented.
             return (0, 0.0) if value is None else (1, float(value))
 
-        rows.sort(key=lambda row: row["game"].title.casefold())
         rows.sort(key=score_of, reverse=True)
-    else:
-        rows.sort(key=lambda row: row["game"].updated_at, reverse=True)
+
+    filters = {"q": q, "platform": platform, "sort": sort}
+    total = len(rows)
+    page_count = max(1, math.ceil(total / CATALOGUE_PAGE_SIZE))
+    if page > page_count:
+        # A page past the end is a stale link, not an error: send the reader to the last
+        # real page instead of an empty table whose paging strip contradicts the address.
+        return RedirectResponse(
+            catalogue_url(filters, page_count), status_code=status.HTTP_303_SEE_OTHER
+        )
+    start = (page - 1) * CATALOGUE_PAGE_SIZE
+    visible = rows[start : start + CATALOGUE_PAGE_SIZE]
 
     return templates.TemplateResponse(
         request=request,
@@ -189,9 +236,26 @@ def games_page(
         context=page_context(
             request,
             auth,
-            rows=rows,
+            rows=visible,
             platforms=platform_rows,
-            filters={"q": q, "platform": platform, "sort": sort},
+            filters=filters,
+            pagination={
+                "page": page,
+                "page_count": page_count,
+                "total": total,
+                "first": start + 1 if visible else 0,
+                "last": start + len(visible),
+                "previous_url": catalogue_url(filters, page - 1) if page > 1 else None,
+                "next_url": catalogue_url(filters, page + 1) if page < page_count else None,
+                # Not "items": Jinja resolves attributes before keys, so that name would
+                # reach dict.items instead of this list.
+                "links": [
+                    None
+                    if number is None
+                    else {"number": number, "url": catalogue_url(filters, number)}
+                    for number in page_numbers(page, page_count)
+                ],
+            },
         ),
     )
 
