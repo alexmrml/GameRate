@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -565,6 +566,16 @@ def build_tag_prompt(game: GameContext) -> str:
 # --- client -----------------------------------------------------------------------
 
 
+def _http_options() -> types.HttpOptions:
+    """Bound every SDK request in time.
+
+    The SDK sends the call with no deadline of its own, so a connection that stops
+    producing bytes stalls the worker thread indefinitely — the run keeps its RUNNING row
+    and the crawl never reaches the next game. ``HttpOptions.timeout`` is milliseconds.
+    """
+    return types.HttpOptions(timeout=max(int(settings.gemini_request_timeout_seconds * 1000), 1))
+
+
 class GeminiClient:
     """Small wrapper around the official SDK with schema validation and retries."""
 
@@ -582,7 +593,7 @@ class GeminiClient:
         if client is None:
             if not key:
                 raise GeminiUnavailable("GEMINI_API_KEY is not configured")
-            client = genai.Client(api_key=key)
+            client = genai.Client(api_key=key, http_options=_http_options())
         self._client = client
         self._sleep = sleep
         self._max_attempts = max_attempts
@@ -663,6 +674,14 @@ class GeminiClient:
                     retry_after = _retry_delay(exc)
                 else:
                     raise GeminiTemporaryError(f"Gemini call failed ({status}): {exc}") from exc
+            except httpx.TimeoutException as exc:
+                # The model never answered inside the request budget. Retrying only
+                # spends that budget again, so the game is handed back to the caller
+                # immediately and the run continues with the next one.
+                raise GeminiTemporaryError(
+                    f"Gemini did not answer within "
+                    f"{settings.gemini_request_timeout_seconds:g}s: {type(exc).__name__}"
+                ) from exc
             except Exception as exc:  # transport errors and SDK surprises
                 last_error = exc
                 retry_after = None

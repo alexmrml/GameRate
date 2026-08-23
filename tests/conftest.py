@@ -21,6 +21,7 @@ os.environ["RUN_STALE_SECONDS"] = "900"
 # The suite must never reach Gemini: tests that exercise enrichment inject a fake client.
 os.environ["GEMINI_API_KEY"] = ""
 os.environ["GEMINI_MODEL"] = "test-model"
+os.environ["GEMINI_REQUEST_TIMEOUT_SECONDS"] = "600"
 os.environ["AI_ENABLED"] = "true"
 os.environ["AI_MIN_REVIEWS"] = "3"
 os.environ["AI_MAX_GAMES_PER_RUN"] = "20"

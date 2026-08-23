@@ -3,6 +3,7 @@
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from google.genai import errors as genai_errors
 
@@ -160,6 +161,33 @@ def test_a_rejected_key_is_fatal_and_not_retried() -> None:
     with pytest.raises(GeminiUnavailable):
         client_for(fake).analyze_reviews(GAME, CRITICS, USERS)
     assert len(fake.models.calls) == 1
+
+
+def test_every_request_carries_the_configured_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def build(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return sdk(reply(FULL_ANALYSIS))
+
+    monkeypatch.setattr("app.collectors.gemini.genai.Client", build)
+    GeminiClient(api_key="a-key", model="test-model")
+
+    # HttpOptions.timeout is milliseconds; without it the SDK sends no deadline at all.
+    assert captured["http_options"].timeout == 600_000
+
+
+def test_a_request_that_times_out_is_reported_instead_of_being_tried_again() -> None:
+    waits: list[float] = []
+    fake = sdk(httpx.ReadTimeout("the model never answered"))
+    client = GeminiClient(client=fake, model="test-model", sleep=waits.append)
+
+    with pytest.raises(GeminiTemporaryError, match="did not answer within 600s"):
+        client.analyze_reviews(GAME, CRITICS, USERS)
+
+    # Spending the same 600 seconds twice more would only stall the run further.
+    assert len(fake.models.calls) == 1
+    assert waits == []
 
 
 def test_an_empty_reply_is_not_treated_as_an_empty_summary() -> None:

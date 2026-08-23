@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     gemini_model: str = "gemma-4-31b-it"
     gemini_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     gemini_max_retries: int = Field(default=3, ge=1, le=10)
+    # A generous ceiling on one HTTP request, not a latency target: without it the SDK
+    # waits forever and a stalled connection freezes the whole run. A request that hits
+    # this bound is not retried — the run moves on to the next game.
+    gemini_request_timeout_seconds: float = Field(default=600.0, gt=0)
     # Three attempts are made inside one logical call. Temporary and schema failures wait
     # at least 30 seconds before the next attempt so a rate-limit window can actually move.
     gemini_retry_delay_seconds: float = Field(default=30.0, ge=30.0)
